@@ -1,0 +1,125 @@
+import { searchGoogleOrganic } from "@/lib/services/serp";
+
+const ATS_HOSTS = [
+  "greenhouse.io",
+  "lever.co",
+  "workdayjobs.com",
+  "myworkdayjobs.com",
+  "ashbyhq.com",
+  "smartrecruiters.com",
+  "jobvite.com",
+  "icims.com",
+  "linkedin.com",
+  "indeed.com",
+  "glassdoor.com"
+];
+
+function uniq(values: string[]) {
+  return [...new Set(values.map((v) => v.trim()).filter(Boolean))];
+}
+
+export function extractEmails(text: string) {
+  return uniq(text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? []);
+}
+
+export function extractLinkedinLinks(text: string) {
+  return uniq(text.match(/https?:\/\/(?:[a-z]+\.)?linkedin\.com\/[^\s"'<>),]+/gi) ?? []).slice(0, 20);
+}
+
+export function extractCompensationRange(text: string) {
+  const clean = text.replace(/\s+/g, " ");
+  const patterns = [
+    /\$ ?\d{2,3}(?:,\d{3})?(?:\.\d+)? ?(?:k|K)?\s*(?:-|to|–|—)\s*\$? ?\d{2,3}(?:,\d{3})?(?:\.\d+)? ?(?:k|K)?(?:\s*(?:\/|per)\s*(?:year|yr|hour|hr))?/,
+    /\b(?:salary|compensation|pay range)[:\s]+.{0,80}?\$ ?\d{2,3}(?:,\d{3})?.{0,40}?\$ ?\d{2,3}(?:,\d{3})?/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = clean.match(pattern);
+    if (match?.[0]) {
+      return match[0].trim();
+    }
+  }
+
+  return null;
+}
+
+function isLikelyCompanyHomepage(url: string) {
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, "");
+    return !ATS_HOSTS.some((blocked) => host === blocked || host.endsWith(`.${blocked}`));
+  } catch {
+    return false;
+  }
+}
+
+async function extractCompanyPageSignals(url: string) {
+  try {
+    const response = await fetch(url, {
+      headers: { "user-agent": "JobMateBot/0.1" },
+      signal: AbortSignal.timeout(12000)
+    });
+
+    if (!response.ok) {
+      return { emails: [] as string[], linkedinLinks: [] as string[] };
+    }
+
+    const html = await response.text();
+    return {
+      emails: extractEmails(html),
+      linkedinLinks: extractLinkedinLinks(html)
+    };
+  } catch {
+    return { emails: [] as string[], linkedinLinks: [] as string[] };
+  }
+}
+
+export async function enrichJobLeadMetadata(params: {
+  company: string;
+  listingText: string;
+  sourceUrl: string;
+  parsedHomepage?: string | null;
+  parsedLinkedinLinks?: string[];
+}) {
+  const emails = extractEmails(params.listingText);
+  const linkedinLinks = [...(params.parsedLinkedinLinks ?? []), ...extractLinkedinLinks(params.listingText)];
+  let companyHomepage = params.parsedHomepage && isLikelyCompanyHomepage(params.parsedHomepage) ? params.parsedHomepage : null;
+
+  const searches = params.company.trim()
+    ? await Promise.allSettled([
+        searchGoogleOrganic(`${params.company} official website`, 5),
+        searchGoogleOrganic(`${params.company} recruiter hiring manager LinkedIn`, 10),
+        searchGoogleOrganic(`${params.company} careers contact email`, 10)
+      ])
+    : [];
+
+  for (const settled of searches) {
+    if (settled.status !== "fulfilled") {
+      continue;
+    }
+
+    for (const result of settled.value) {
+      if (!companyHomepage && isLikelyCompanyHomepage(result.link)) {
+        companyHomepage = result.link;
+      }
+
+      if (/linkedin\.com\/(?:in|company)\//i.test(result.link)) {
+        linkedinLinks.push(result.link);
+      }
+
+      emails.push(...extractEmails(`${result.title} ${result.snippet}`));
+    }
+  }
+
+  if (companyHomepage) {
+    const pageSignals = await extractCompanyPageSignals(companyHomepage);
+    emails.push(...pageSignals.emails);
+    linkedinLinks.push(...pageSignals.linkedinLinks);
+  }
+
+  return {
+    compensationRange: extractCompensationRange(params.listingText),
+    companyHomepage,
+    linkedinLinks: uniq(linkedinLinks).slice(0, 20),
+    hiringContacts: uniq(emails).slice(0, 20)
+  };
+}

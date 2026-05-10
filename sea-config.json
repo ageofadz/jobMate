@@ -1,0 +1,6 @@
+{
+  "main": "./dist/sea/jobmate.mjs",
+  "output": "./dist/sea/jobmate.blob",
+  "disableExperimentalSEAWarning": true,
+  "useCodeCache": false
+}

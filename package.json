@@ -1,0 +1,32 @@
+{
+  "name": "jobmate",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "esbuild cli/index.ts --bundle --platform=node --packages=external --format=esm --tsconfig=tsconfig.json --outfile=dist/jobmate.mjs",
+    "build:sea-bundle": "esbuild cli/index.ts --bundle --platform=node --format=esm --tsconfig=tsconfig.json --outfile=dist/sea/jobmate.mjs --external:better-sqlite3 --alias:react-devtools-core=./scripts/sea-react-devtools-stub.mjs",
+    "build:sea": "npm run build:sea-bundle && node scripts/build-sea.mjs",
+    "start": "npm run build && node dist/jobmate.mjs",
+    "jobmate": "npm run build && node dist/jobmate.mjs",
+    "typecheck": "tsc --noEmit",
+    "seed-user": "tsx scripts/seed-user.ts"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^7.5.0",
+    "better-sqlite3": "^11.10.0",
+    "cheerio": "^1.0.0",
+    "docx": "^9.5.1",
+    "ink": "^7.0.1",
+    "pdf-parse": "^1.1.1",
+    "react": "^19.2.5",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "esbuild": "^0.27.0",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.15.18",
+    "@types/react": "^19.2.14",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  }
+}

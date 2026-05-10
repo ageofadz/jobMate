@@ -1,0 +1,50 @@
+import { getSqlite } from "@/lib/db";
+
+export const SETTING_SERPAPI_API_KEY = "serpapi_api_key";
+export const SETTING_GEMINI_API_KEY = "gemini_api_key";
+export const SETTING_GEMINI_MODEL = "gemini_model";
+export const SETTING_NOTIFICATION_WEBHOOK_URL = "notification_webhook_url";
+export const SETTING_INITIAL_SETUP_COMPLETE = "initial_setup_complete";
+export const SETTING_LANGUAGE = "language";
+export const SETTING_CHROME_EXTENSION_OUTPUT_DIR = "chrome_extension_output_dir";
+
+export function getSetting(key: string): string | null {
+  const db = getSqlite();
+  const row = db.prepare(`SELECT value FROM kv_settings WHERE key = ?`).get(key) as { value: string } | undefined;
+  return row?.value ?? null;
+}
+
+export function setSetting(key: string, value: string) {
+  const db = getSqlite();
+  db.prepare(`INSERT OR REPLACE INTO kv_settings (key, value) VALUES (?, ?)`).run(key, value);
+}
+
+export function getSerpApiKey() {
+  return getSetting(SETTING_SERPAPI_API_KEY) ?? undefined;
+}
+
+export function getGeminiApiKey() {
+  return getSetting(SETTING_GEMINI_API_KEY) ?? undefined;
+}
+
+export function getGeminiModel() {
+  return getSetting(SETTING_GEMINI_MODEL) || "gemini-3-flash-preview";
+}
+
+export function getNotificationWebhookUrl() {
+  const v = getSetting(SETTING_NOTIFICATION_WEBHOOK_URL);
+  return v?.trim() ? v : undefined;
+}
+
+export function getLanguageSetting() {
+  return getSetting(SETTING_LANGUAGE) ?? "en";
+}
+
+export function getChromeExtensionOutputDir() {
+  const v = getSetting(SETTING_CHROME_EXTENSION_OUTPUT_DIR);
+  return v?.trim() ? v.trim() : undefined;
+}
+
+export function isInitialSetupComplete() {
+  return getSetting(SETTING_INITIAL_SETUP_COMPLETE) === "1";
+}

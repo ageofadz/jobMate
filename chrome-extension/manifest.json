@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "JobMate Form Filler",
+  "version": "0.1.0",
+  "description": "Reads live application form labels and types JobMate answers into the page.",
+  "permissions": [],
+  "host_permissions": ["<all_urls>"],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
