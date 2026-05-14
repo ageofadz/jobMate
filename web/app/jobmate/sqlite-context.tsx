@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 
-import { createJobmateSqlite, type JobmateSqlite } from "./sqlite-client";
+import type { JobmateSqlite } from "./sqlite-client";
 
 type JobmateSqliteContextValue = {
   sqlite: JobmateSqlite | null;
@@ -16,15 +16,28 @@ export function JobmateSqliteProvider({ children }: { children: React.ReactNode 
   const [error, setError] = useState<Error | null>(null);
 
   useEffect(() => {
-    const s = createJobmateSqlite();
-    setSqlite(s);
     let cancelled = false;
+    let s: JobmateSqlite | null = null;
 
-    s.init()
-      .then(() => {
-        if (!cancelled) {
-          setReady(true);
+    void import("./sqlite-client")
+      .then(({ createJobmateSqlite }) => {
+        if (cancelled) {
+          return;
         }
+        s = createJobmateSqlite();
+        setSqlite(s);
+        return s
+          .init()
+          .then(() => {
+            if (!cancelled) {
+              setReady(true);
+            }
+          })
+          .catch((e: unknown) => {
+            if (!cancelled) {
+              setError(e instanceof Error ? e : new Error(String(e)));
+            }
+          });
       })
       .catch((e: unknown) => {
         if (!cancelled) {
@@ -34,7 +47,7 @@ export function JobmateSqliteProvider({ children }: { children: React.ReactNode 
 
     return () => {
       cancelled = true;
-      s.terminate();
+      s?.terminate();
       setSqlite(null);
       setReady(false);
     };
