@@ -20,6 +20,7 @@ COPY web/package.json web/package-lock.json ./
 COPY web/ ./
 COPY lib /lib
 COPY --from=development-dependencies-env /app/node_modules /app/node_modules
+RUN ln -sfn /app/node_modules /lib/node_modules
 RUN npm run build:ci
 
 FROM node:20-alpine
