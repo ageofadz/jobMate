@@ -47,10 +47,6 @@ export default defineConfig(({ command }) => {
       fs: {
         allow: [jobmateRoot]
       },
-      headers: {
-        "Cross-Origin-Opener-Policy": "same-origin",
-        "Cross-Origin-Embedder-Policy": "require-corp",
-      },
     },
   };
 });
