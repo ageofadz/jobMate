@@ -1,0 +1,17 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPOSITORY}/web:latest
+      - .
+
+substitutions:
+  _REGION: us-central1
+  _AR_REPOSITORY: jobmate
+
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPOSITORY}/web:latest
+
+options:
+  logging: CLOUD_LOGGING_ONLY
