@@ -1,0 +1,12 @@
+.git
+.gitignore
+.cursor
+**/node_modules
+web/build
+web/.react-router
+data
+web/data
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+agent-transcripts
