@@ -1,4 +1,5 @@
 FROM node:20-alpine AS development-dependencies-env
+RUN apk add --no-cache python3 make g++
 WORKDIR /app
 COPY web/package.json web/package-lock.json ./
 RUN npm config set fetch-retries 10 \
@@ -7,6 +8,7 @@ RUN npm config set fetch-retries 10 \
   && npm ci
 
 FROM node:20-alpine AS production-dependencies-env
+RUN apk add --no-cache python3 make g++
 WORKDIR /app
 COPY web/package.json web/package-lock.json ./
 RUN npm config set fetch-retries 10 \

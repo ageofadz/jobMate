@@ -14,6 +14,14 @@ export default defineConfig({
       "@": jobmateRoot
     }
   },
+  ssr: {
+    external: ["better-sqlite3"]
+  },
+  build: {
+    rollupOptions: {
+      external: ["better-sqlite3"]
+    }
+  },
   optimizeDeps: {
     include: [
       "@jlongster/sql.js",
