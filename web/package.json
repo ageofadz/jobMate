@@ -6,6 +6,7 @@
     "zip-extension": "sh -c 'cd .. && rm -f web/public/chrome-extension.zip && zip -r web/public/chrome-extension.zip chrome-extension -x \"*.DS_Store\"'",
     "prebuild": "npm run zip-extension",
     "build": "react-router build",
+    "build:ci": "react-router build",
     "dev": "react-router dev",
     "start": "react-router-serve ./build/server/index.js",
     "typecheck": "react-router typegen && tsc"
