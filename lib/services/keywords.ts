@@ -1,8 +1,6 @@
 import { uniq } from "@/lib/utils";
 import type { PreferenceInput } from "@/lib/validators";
 
-const SENIORITY_HINTS = ["staff engineer", "principal engineer", "senior staff engineer", "lead engineer"];
-
 export function buildGeneratedKeywords(input: PreferenceInput) {
   const title = input.title.toLowerCase();
   const locationHints = input.locations.map((item) => item.toLowerCase());
@@ -12,44 +10,71 @@ export function buildGeneratedKeywords(input: PreferenceInput) {
   return uniq([
     input.title,
     ...input.keywordSeed,
-    ...SENIORITY_HINTS.filter((hint) => title.includes("engineer") || title.includes("developer")),
     ...fragments,
     ...locationHints,
     ...boardHints
   ]).slice(0, 20);
 }
 
+function locationParenGroup(locations: string[]) {
+  const inner = locations.map((loc) => `"${loc.trim()}"`).join(" OR ");
+  return `(${inner})`;
+}
+
+function leverJobsSearchQuery(term: string, locations: string[]) {
+  const trimmed = term.trim();
+  const quotedTerm = `"${trimmed}"`;
+  const trimLocs = locations.map((loc) => loc.trim()).filter(Boolean);
+  const locPart =
+    trimLocs.length === 1
+      ? `"${trimLocs[0]}"`
+      : trimLocs.length > 1
+        ? `(${trimLocs.map((loc) => `"${loc}"`).join(" OR ")})`
+        : "";
+
+  return `site:jobs.lever.co ${quotedTerm} ${locPart} "/apply"`.replace(/\s+/g, " ").trim();
+}
+
 export function buildSearchQueries(input: PreferenceInput) {
-  const locationText = input.locations.map((location) => `"${location}"`).join(" OR ");
-  const keywordTerms = uniq([input.title, ...input.keywordSeed]).filter(Boolean);
-  const afterDate = new Date(Date.now() - Math.max(1, input.searchAfterDays) * 24 * 60 * 60 * 1000)
-    .toISOString()
-    .slice(0, 10);
-  const recency = `after:${afterDate}`;
+  const locationParen = locationParenGroup(input.locations);
+  const roleTitle = input.title.trim();
+  const expansionTerms = uniq(input.keywordSeed.map((s) => s.trim()).filter(Boolean)).filter(
+    (term) => term !== roleTitle
+  );
   const queries: string[] = [];
 
   for (const domain of input.boardDomains) {
     const normalizedDomain = domain.trim().toLowerCase();
+    const isLeverBoard =
+      normalizedDomain === "lever.co" || normalizedDomain === "jobs.lever.co";
     const boardBase =
-      normalizedDomain === "lever.co"
-        ? `site:jobs.lever.co "${input.title}" (${locationText}) inurl:/jobs/ ${recency}`
+      isLeverBoard
+        ? leverJobsSearchQuery(roleTitle, input.locations)
         : normalizedDomain === "boards.greenhouse.io"
-          ? `site:boards.greenhouse.io "${input.title}" (${locationText}) inurl:/jobs/ ${recency}`
-          : `site:${domain} "${input.title}" (${locationText}) ${recency}`;
+          ? `site:boards.greenhouse.io ${roleTitle} ${locationParen}`
+          : `site:${domain} ${roleTitle} ${locationParen}`;
 
     queries.push(boardBase.trim());
 
-    for (const keyword of keywordTerms) {
+    for (const keyword of expansionTerms) {
       const expanded =
-        normalizedDomain === "lever.co"
-          ? `site:jobs.lever.co "${keyword}" "${input.title}" (${locationText}) inurl:/jobs/ ${recency}`
+        isLeverBoard
+          ? leverJobsSearchQuery(keyword, input.locations)
           : normalizedDomain === "boards.greenhouse.io"
-            ? `site:boards.greenhouse.io "${keyword}" "${input.title}" (${locationText}) inurl:/jobs/ ${recency}`
-            : `site:${domain} "${keyword}" "${input.title}" (${locationText}) ${recency}`;
+            ? `site:boards.greenhouse.io ${keyword} ${locationParen}`
+            : `site:${domain} ${keyword} ${locationParen}`;
 
       queries.push(expanded.trim());
     }
   }
 
   return uniq(queries).slice(0, 12);
+}
+
+export function enrichPreferenceInput(input: PreferenceInput) {
+  return {
+    ...input,
+    generatedKeywords: buildGeneratedKeywords(input),
+    searchQueries: buildSearchQueries(input)
+  };
 }

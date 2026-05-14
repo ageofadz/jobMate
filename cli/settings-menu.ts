@@ -5,7 +5,7 @@ import { defaultChromeExtensionOutputDir, installChromeExtensionBundle, openChro
 import { prepareStdinBeforeExternalPrompts } from "./prepare-stdin-prompts";
 import { reportError } from "./report-error";
 import {
-  attachResumeToAllPreferences,
+  setUserResumeAsset,
   createResumeAssetFromPath,
   deletePreference,
   getPreferenceMap,
@@ -353,7 +353,7 @@ export async function runResumeSettings(userId: string) {
 
     try {
       pathRaw = await input({
-        message: "Path to resume PDF (replaces resume for all your search preferences)",
+        message: "Path to resume PDF (saved on your profile)",
         default: ""
       });
     } catch (err) {
@@ -370,9 +370,9 @@ export async function runResumeSettings(userId: string) {
     }
 
     try {
-      const assetId = await createResumeAssetFromPath(userId, pathRaw.trim());
-      attachResumeToAllPreferences(userId, assetId);
-      process.stdout.write("Resume saved and linked to all preferences.\n\n");
+      const assetId = createResumeAssetFromPath(userId, pathRaw.trim());
+      setUserResumeAsset(userId, assetId);
+      process.stdout.write("Resume saved on profile.\n\n");
       return;
     } catch (err) {
       reportError("Resume PDF could not be loaded", err);

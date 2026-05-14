@@ -240,8 +240,12 @@ export function DashboardApp({ userId, onExit }: DashboardAppProps) {
       return `Searching target ${progress.targetIndex}/${progress.targetTotal}: ${progress.targetTitle}`;
     }
 
+    if (progress.stage === "serp_queries") {
+      return `Target ${progress.targetIndex}/${progress.targetTotal} ${progress.targetTitle}: SerpApi ${progress.completed}/${progress.total} queries`;
+    }
+
     if (progress.stage === "retrieved") {
-      return `Target ${progress.targetIndex}/${progress.targetTotal} ${progress.targetTitle}: retrieved ${progress.retrieved}/${progress.limit} search results`;
+      return `Target ${progress.targetIndex}/${progress.targetTotal} ${progress.targetTitle}: retrieved ${progress.retrieved}/${progress.limit} listing URLs`;
     }
 
     if (progress.stage === "processing") {
@@ -803,7 +807,7 @@ export function DashboardApp({ userId, onExit }: DashboardAppProps) {
                     prefs.slice(0, listMax).map((p, i) => {
                       const locs = (p.locations as string[]).join(", ");
                       const enabled = p.enabled !== false;
-                      const line = `${enabled ? "on " : "off"} · ${String(p.title)} · ${locs} · after:${String(p.searchAfterDays ?? 14)}d`;
+                      const line = `${enabled ? "on " : "off"} · ${String(p.title)} · ${locs}`;
                       const hit = i === Math.min(targetIdx, prefs.length - 1);
 
                       return (
@@ -835,7 +839,7 @@ export function DashboardApp({ userId, onExit }: DashboardAppProps) {
                   <Box flexDirection="row">
                     <Box flexDirection="row" width={resultsW}>
                       {prefs.length === 0 ? (
-                        <Text color={t.warn}>{translate("targetsEmpty", undefined, language)}</Text>
+                        <Text color={t.warn}>{translate("noTargetsYet", undefined, language)}</Text>
                       ) : (
                         prefs.map((p, col) => {
                           const colJobs = jobsByPreference.get(String(p._id)) ?? [];
@@ -855,7 +859,7 @@ export function DashboardApp({ userId, onExit }: DashboardAppProps) {
                                   </Text>
                                 );
                               })}
-                              {!colJobs.length && <Text color={t.warn}>{translate("resultsEmpty", undefined, language)}</Text>}
+                              {!colJobs.length && <Text color={t.warn}>{translate("noResults", undefined, language)}</Text>}
                             </Box>
                           );
                         })

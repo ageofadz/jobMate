@@ -236,7 +236,7 @@ export function getAppLanguage(): AppLanguage {
 }
 
 export function translate(key: TranslationKey, params?: Record<string, string | number>, language = getAppLanguage()) {
-  let text = STRINGS[language][key];
+  let text: string = STRINGS[language][key];
 
   if (!params) {
     return text;

@@ -5,9 +5,8 @@ import path from "node:path";
 import { normalizeApplyUrl } from "@/lib/apply-url";
 import { getSqlite } from "@/lib/db";
 import { getFilesDir } from "@/lib/env";
-import { writeUploadedFile } from "@/lib/files";
-import { enrichPreferenceInput } from "@/lib/services/ingest";
-import { extractTextFromPdf } from "@/lib/services/resume";
+import { writeUploadedFile, readUploadedFileRelative } from "@/lib/files";
+import { enrichPreferenceInput } from "@/lib/services/keywords";
 import type { PreferenceInput } from "@/lib/validators";
 
 export async function getPreferencesForUser(userId: string) {
@@ -167,7 +166,6 @@ function mapPreferenceRow(row: PreferenceRow): Record<string, unknown> {
     contextBlock: row.context_block,
     timezone: row.timezone,
     scheduleHourLocal: row.schedule_hour_local,
-    resumeAssetId: row.resume_asset_id ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
@@ -253,6 +251,53 @@ export async function loadResumeText(userId: string, assetId: string | null | un
     .get(assetId, userId) as { extracted_text: string | null } | undefined;
 
   return row?.extracted_text ?? "";
+}
+
+export function loadResumePdfPayload(userId: string, assetId: string | null | undefined) {
+  if (!assetId) {
+    return null;
+  }
+
+  const db = getSqlite();
+  const row = db
+    .prepare(
+      `SELECT filename, mime_type, storage_path, file_blob FROM assets WHERE id = ? AND user_id = ? AND kind = ?`
+    )
+    .get(assetId, userId, "resume_pdf") as
+    | { filename: string; mime_type: string; storage_path: string; file_blob: Buffer | null | Uint8Array }
+    | undefined;
+
+  if (!row) {
+    return null;
+  }
+
+  let buffer: Buffer | null = null;
+
+  if (row.file_blob) {
+    if (Buffer.isBuffer(row.file_blob) && row.file_blob.byteLength > 0) {
+      buffer = row.file_blob;
+    } else if (row.file_blob instanceof Uint8Array && row.file_blob.byteLength > 0) {
+      buffer = Buffer.from(row.file_blob);
+    }
+  }
+
+  if (!buffer) {
+    try {
+      buffer = readUploadedFileRelative(row.storage_path);
+    } catch {
+      buffer = null;
+    }
+  }
+
+  if (!buffer || buffer.byteLength === 0) {
+    return null;
+  }
+
+  return {
+    buffer,
+    filename: row.filename,
+    mimeType: row.mime_type?.trim() ? row.mime_type : "application/pdf"
+  };
 }
 
 export function listJobsNotApplied(userId: string) {
@@ -449,7 +494,7 @@ export function insertPreference(userId: string, input: PreferenceInput) {
     enriched.contextBlock,
     enriched.timezone,
     enriched.scheduleHourLocal,
-    enriched.resumeAssetId ?? null,
+    null,
     now,
     now
   );
@@ -490,7 +535,7 @@ export function updatePreference(userId: string, preferenceId: string, input: Pr
       enriched.contextBlock,
       enriched.timezone,
       enriched.scheduleHourLocal,
-      enriched.resumeAssetId ?? null,
+      null,
       now,
       preferenceId,
       userId
@@ -515,7 +560,7 @@ export function deletePreference(userId: string, preferenceId: string) {
   return result.changes > 0;
 }
 
-export async function createResumeAssetFromPath(userId: string, absolutePath: string) {
+export function createResumeAssetFromPath(userId: string, absolutePath: string) {
   const resolved = path.resolve(absolutePath);
 
   if (!fs.existsSync(resolved)) {
@@ -524,7 +569,6 @@ export async function createResumeAssetFromPath(userId: string, absolutePath: st
 
   const buffer = fs.readFileSync(resolved);
   const { relativePath } = writeUploadedFile(buffer, path.basename(resolved));
-  const extractedText = await extractTextFromPdf(buffer);
   const assetId = randomUUID();
   const now = new Date().toISOString();
   const db = getSqlite();
@@ -540,22 +584,18 @@ export async function createResumeAssetFromPath(userId: string, absolutePath: st
     "application/pdf",
     buffer.byteLength,
     relativePath,
-    extractedText,
+    null,
     now
   );
 
   return assetId;
 }
 
-export function attachResumeToAllPreferences(userId: string, resumeAssetId: string) {
+export function setUserResumeAsset(userId: string, resumeAssetId: string | null) {
   const db = getSqlite();
   const now = new Date().toISOString();
 
-  db.prepare(`UPDATE preferences SET resume_asset_id = ?, updated_at = ? WHERE user_id = ?`).run(
-    resumeAssetId,
-    now,
-    userId
-  );
+  db.prepare(`UPDATE users SET resume_asset_id = ?, updated_at = ? WHERE id = ?`).run(resumeAssetId, now, userId);
 }
 
 export type UserProfile = {
@@ -572,6 +612,7 @@ export type UserProfile = {
   workHistory: string | null;
   skills: string | null;
   essay: string | null;
+  resumeAssetId: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -590,6 +631,7 @@ type UserRow = {
   work_history: string | null;
   skills: string | null;
   essay: string | null;
+  resume_asset_id: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -609,6 +651,7 @@ function mapUserRow(row: UserRow): UserProfile {
     workHistory: row.work_history,
     skills: row.skills,
     essay: row.essay,
+    resumeAssetId: row.resume_asset_id ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };

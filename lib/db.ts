@@ -35,11 +35,12 @@ CREATE TABLE users_migrated (
   work_history TEXT,
   skills TEXT,
   essay TEXT,
+  resume_asset_id TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
-INSERT INTO users_migrated (id, email, full_name, location, current_location, phone, linkedin_url, preferred_comp_range, cover_letter_template, website, work_history, skills, essay, created_at, updated_at)
-SELECT id, email, name, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, created_at, updated_at FROM users;
+INSERT INTO users_migrated (id, email, full_name, location, current_location, phone, linkedin_url, preferred_comp_range, cover_letter_template, website, work_history, skills, essay, resume_asset_id, created_at, updated_at)
+SELECT id, email, name, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, created_at, updated_at FROM users;
 DROP TABLE users;
 ALTER TABLE users_migrated RENAME TO users;
 COMMIT;
@@ -129,6 +130,7 @@ CREATE TABLE IF NOT EXISTS users (
   work_history TEXT,
   skills TEXT,
   essay TEXT,
+  resume_asset_id TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -162,6 +164,7 @@ CREATE TABLE IF NOT EXISTS assets (
   byte_length INTEGER NOT NULL,
   storage_path TEXT NOT NULL,
   extracted_text TEXT,
+  file_blob BLOB,
   created_at TEXT NOT NULL,
   FOREIGN KEY (user_id) REFERENCES users(id)
 );
@@ -246,6 +249,27 @@ function migrateApplicationSchema(db: Database.Database) {
   ensureColumn(db, "jobs", "applied_application_url", "applied_application_url TEXT");
   ensureColumn(db, "jobs", "applied_at_hiring_contacts", "applied_at_hiring_contacts TEXT NOT NULL DEFAULT '[]'");
   ensureColumn(db, "jobs", "applied_at_linkedin_links", "applied_at_linkedin_links TEXT NOT NULL DEFAULT '[]'");
+  ensureColumn(db, "assets", "file_blob", "file_blob BLOB");
+  ensureColumn(db, "users", "resume_asset_id", "resume_asset_id TEXT");
+
+  const marker = db.prepare(`SELECT 1 AS x FROM kv_settings WHERE key = ?`).get("jobmate_resume_profile_backfill");
+
+  if (!marker) {
+    db.exec(`
+UPDATE users
+SET resume_asset_id = (
+  SELECT p.resume_asset_id FROM preferences p
+  WHERE p.user_id = users.id AND p.resume_asset_id IS NOT NULL
+  ORDER BY p.updated_at DESC
+  LIMIT 1
+)
+WHERE resume_asset_id IS NULL
+AND EXISTS (
+  SELECT 1 FROM preferences p WHERE p.user_id = users.id AND p.resume_asset_id IS NOT NULL
+);
+`);
+    db.prepare(`INSERT OR REPLACE INTO kv_settings (key, value) VALUES (?, ?)`).run("jobmate_resume_profile_backfill", "1");
+  }
 }
 
 export function getSqlite(): Database.Database {

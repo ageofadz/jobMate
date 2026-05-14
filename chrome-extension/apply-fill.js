@@ -9,6 +9,31 @@
   history.replaceState(null, document.title, location.pathname + location.search);
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  function chromeApplySibling(resourceUrl, segment) {
+    const raw = String(resourceUrl).trim();
+
+    try {
+      const u = new URL(raw);
+      let path = u.pathname.replace(/\/+$/, "") || "/";
+
+      if (/\/payload$/i.test(path)) {
+        u.pathname = `${path.replace(/\/payload$/i, "")}/${segment}`;
+        return u.toString();
+      }
+
+      const baseMatch = path.match(/^(.+\/api\/chrome-apply\/[^/]+)$/i);
+
+      if (baseMatch) {
+        u.pathname = `${baseMatch[1]}/${segment}`;
+        return u.toString();
+      }
+    } catch {
+    }
+
+    return raw.replace(/\/payload\/?(\?.*)?$/i, `/${segment}$1`);
+  }
+
   const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
   const norm = (value) => clean(value).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
   const demographicPattern = /\b(pronouns?|race|ethnicity|gender|disabilit(?:y|ies)|veteran|eeo|equal opportunity|hispanic|latino|self identify|self-identify)\b/i;
@@ -241,17 +266,95 @@
     box.textContent = message;
   }
 
+  function fetchViaExtension(url, init = {}, attempt = 0) {
+    return new Promise((resolve, reject) => {
+      const headers =
+        init.headers instanceof Headers
+          ? Object.fromEntries(init.headers.entries())
+          : { ...(init.headers || {}) };
+
+      chrome.runtime.sendMessage(
+        {
+          type: "jobmate_fetch",
+          url,
+          method: init.method || "GET",
+          headers,
+          body: init.body
+        },
+        (response) => {
+          const last = chrome.runtime.lastError;
+
+          if (last) {
+            const msg = last.message || "";
+            const retry =
+              attempt < 5 &&
+              (/Receiving end does not exist|The message port closed before a response was received|Could not establish connection/i.test(
+                msg
+              ));
+
+            if (retry) {
+              setTimeout(() => {
+                fetchViaExtension(url, init, attempt + 1).then(resolve).catch(reject);
+              }, 80 * (attempt + 1));
+              return;
+            }
+
+            reject(new Error(msg || "Extension messaging failed"));
+            return;
+          }
+
+          if (!response) {
+            reject(new Error("Empty extension response"));
+            return;
+          }
+
+          if (response.error) {
+            reject(new Error(response.error));
+            return;
+          }
+
+          resolve(response);
+        }
+      );
+    });
+  }
+
+  async function jobmateFetch(url, init = {}) {
+    if (typeof chrome !== "undefined" && chrome.runtime?.id) {
+      const ext = await fetchViaExtension(url, init);
+      return {
+        ok: ext.ok,
+        status: ext.status,
+        json: async () => JSON.parse(ext.text)
+      };
+    }
+
+    return fetch(url, init);
+  }
+
   async function run() {
     panel("JobMate: loading payload...");
-    const payload = await fetch(payloadUrl).then((res) => res.json());
+    const payloadRes = await jobmateFetch(payloadUrl);
+
+    if (!payloadRes.ok) {
+      throw new Error(`Payload HTTP ${payloadRes.status}`);
+    }
+
+    const payload = await payloadRes.json();
     const fieldItems = controls();
     panel(`JobMate: read ${fieldItems.length} form fields; asking LLM...`);
-    const answerUrl = payloadUrl.replace("/payload/", "/answers/");
-    const answersPayload = await fetch(answerUrl, {
+    const answerUrl = chromeApplySibling(payloadUrl, "answers");
+    const answersPayloadRes = await jobmateFetch(answerUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ fields: fieldItems.map((item) => item.field) })
-    }).then((res) => res.json());
+    });
+
+    if (!answersPayloadRes.ok) {
+      throw new Error(`Answers HTTP ${answersPayloadRes.status}`);
+    }
+
+    const answersPayload = await answersPayloadRes.json();
     const answers = new Map((answersPayload.answers || []).map((item) => [item.fieldId, item.answer || ""]));
     for (const item of fieldItems) {
       const current = answers.get(item.field.fieldId) || "";
@@ -271,7 +374,7 @@
       await fillControl(item, answers.get(item.field.fieldId) || "");
     }
 
-    await fetch(payloadUrl.replace("/payload/", "/complete/"), {
+    await jobmateFetch(chromeApplySibling(payloadUrl, "complete"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ applicationUrl: location.href })

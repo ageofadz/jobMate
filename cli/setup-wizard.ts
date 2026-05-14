@@ -97,14 +97,7 @@ export async function runInitialSetupWizardIfNeeded(userId: string) {
     default: profile.skills ?? ""
   })).trim();
 
-  const chromeExtensionOutputDir = (await input({
-    message: translate("chromeExtensionOutputDirectory"),
-    default: getChromeExtensionOutputDir() ?? defaultChromeExtensionOutputDir()
-  })).trim();
-
-  if (!chromeExtensionOutputDir) {
-    throw new Error(translate("chromeExtensionOutputRequired"));
-  }
+  const chromeExtensionOutputDir = getChromeExtensionOutputDir()?.trim() || defaultChromeExtensionOutputDir();
 
   const installChromeExtension = await confirm({
     message: translate("exportChromeExtensionNow"),

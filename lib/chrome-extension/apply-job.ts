@@ -8,6 +8,7 @@ import {
   getAssetUploadInfo,
   getJobById,
   getUserProfile,
+  loadResumePdfPayload,
   loadResumeText,
   markJobApplied
 } from "@/lib/data";
@@ -82,6 +83,7 @@ export async function runApplyJobChromeExtension(jobId: string, userId: string) 
   const profileBlock = profile ? formatProfileForPrompt(profile) : "";
   const resumeAssetId = job.resumeAssetId ? String(job.resumeAssetId) : null;
   const resumeText = await loadResumeText(userId, resumeAssetId);
+  const resumePayload = loadResumePdfPayload(userId, resumeAssetId);
   const listingText = String(job.listingText ?? "");
   const company = String(job.company ?? "");
   const title = String(job.sourceTitle ?? "");
@@ -89,7 +91,13 @@ export async function runApplyJobChromeExtension(jobId: string, userId: string) 
 
   let resumeUpload: ChromeApplyPayload["resumeUpload"] = null;
 
-  if (resumeAssetId) {
+  if (resumePayload) {
+    resumeUpload = {
+      name: resumePayload.filename,
+      mimeType: resumePayload.mimeType,
+      base64: base64(resumePayload.buffer)
+    };
+  } else if (resumeAssetId) {
     const info = await getAssetUploadInfo(resumeAssetId, userId);
 
     if (info && fs.existsSync(info.absolutePath)) {

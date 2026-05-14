@@ -1,4 +1,4 @@
-import { formatProfileForPrompt, getJobById, getUserProfile, loadResumeText } from "@/lib/data";
+import { formatProfileForPrompt, getJobById, getUserProfile, loadResumePdfPayload } from "@/lib/data";
 import { getAppLanguage } from "@/lib/i18n";
 import { generateHiringContactEmail } from "@/lib/services/llm";
 import { openUrlsInChromeWindow } from "@/lib/open-chrome";
@@ -30,12 +30,12 @@ export async function openFollowUpEmails(userId: string, jobId: string) {
   }
 
   const profileBlock = profile ? formatProfileForPrompt(profile) : "";
-  const resumeText = await loadResumeText(userId, job.resumeAssetId ? String(job.resumeAssetId) : null);
+  const resumePdf = loadResumePdfPayload(userId, job.resumeAssetId ? String(job.resumeAssetId) : null)?.buffer ?? null;
   const drafts = await Promise.all(
     contacts.slice(0, 5).map(async (contact) => {
       const draft = await generateHiringContactEmail({
         profileBlock,
-        resumeText,
+        resumePdf,
         listingText: String(job.listingText ?? ""),
         company: String(job.company ?? ""),
         roleTitle: String(job.sourceTitle ?? ""),

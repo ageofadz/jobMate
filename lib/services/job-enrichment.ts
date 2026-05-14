@@ -1,3 +1,4 @@
+import type { OrganicSearchResult } from "@/lib/services/serp-shared";
 import { searchGoogleOrganic } from "@/lib/services/serp";
 
 const ATS_HOSTS = [
@@ -18,8 +19,28 @@ function uniq(values: string[]) {
   return [...new Set(values.map((v) => v.trim()).filter(Boolean))];
 }
 
+const IMAGE_FILE_TLD = /^(png|jpe?g|gif|webp|svg|ico|bmp|avif)$/i;
+
+function dropImageArtifactEmails(emails: string[]) {
+  return emails.filter((email) => {
+    const lower = email.toLowerCase();
+    const domain = lower.split("@")[1] ?? "";
+    const host = domain.split(":")[0];
+    const lastDot = host.lastIndexOf(".");
+
+    if (lastDot < 0) {
+      return true;
+    }
+
+    const tld = host.slice(lastDot + 1);
+    return !IMAGE_FILE_TLD.test(tld);
+  });
+}
+
 export function extractEmails(text: string) {
-  return uniq(text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? []);
+  return dropImageArtifactEmails(
+    uniq(text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? [])
+  );
 }
 
 export function extractLinkedinLinks(text: string) {
@@ -73,22 +94,43 @@ async function extractCompanyPageSignals(url: string) {
   }
 }
 
+function emailsCompatibleWithCompany(emails: string[], company: string): string[] {
+  const govEmployer =
+    /\b(city|county|state|federal|government|municipal|district)\b/i.test(company) || /\.gov\b/i.test(company);
+
+  return emails.filter((email) => {
+    const domain = email.split("@")[1]?.toLowerCase() ?? "";
+
+    if (!domain) {
+      return false;
+    }
+
+    if ((domain.endsWith(".gov") || domain.endsWith(".mil")) && !govEmployer) {
+      return false;
+    }
+
+    return true;
+  });
+}
+
 export async function enrichJobLeadMetadata(params: {
   company: string;
   listingText: string;
   sourceUrl: string;
   parsedHomepage?: string | null;
   parsedLinkedinLinks?: string[];
+  fetchOrganic?: (query: string, limit: number) => Promise<OrganicSearchResult[]>;
 }) {
+  const fetchOrganic = params.fetchOrganic ?? searchGoogleOrganic;
   const emails = extractEmails(params.listingText);
   const linkedinLinks = [...(params.parsedLinkedinLinks ?? []), ...extractLinkedinLinks(params.listingText)];
   let companyHomepage = params.parsedHomepage && isLikelyCompanyHomepage(params.parsedHomepage) ? params.parsedHomepage : null;
 
   const searches = params.company.trim()
     ? await Promise.allSettled([
-        searchGoogleOrganic(`${params.company} official website`, 5),
-        searchGoogleOrganic(`${params.company} recruiter hiring manager LinkedIn`, 10),
-        searchGoogleOrganic(`${params.company} careers contact email`, 10)
+        fetchOrganic(`${params.company} official website`, 5),
+        fetchOrganic(`${params.company} recruiter hiring manager LinkedIn`, 10),
+        fetchOrganic(`${params.company} careers contact email`, 10)
       ])
     : [];
 
@@ -116,10 +158,13 @@ export async function enrichJobLeadMetadata(params: {
     linkedinLinks.push(...pageSignals.linkedinLinks);
   }
 
+  const mergedEmails = uniq(emails);
+  const filteredEmails = emailsCompatibleWithCompany(mergedEmails, params.company);
+
   return {
     compensationRange: extractCompensationRange(params.listingText),
     companyHomepage,
     linkedinLinks: uniq(linkedinLinks).slice(0, 20),
-    hiringContacts: uniq(emails).slice(0, 20)
+    hiringContacts: filteredEmails.slice(0, 20)
   };
 }

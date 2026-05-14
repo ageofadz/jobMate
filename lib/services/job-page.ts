@@ -2,7 +2,7 @@ import * as cheerio from "cheerio";
 
 import { normalizeApplyUrl } from "@/lib/apply-url";
 import { extractCompensationRange, extractEmails, extractLinkedinLinks } from "@/lib/services/job-enrichment";
-import { inferCompanyNameFromListing } from "@/lib/services/llm";
+import { inferCompanyNameFromListing, inferJobListingCoreFields } from "@/lib/services/llm";
 import type { ParsedJobPage } from "@/lib/types";
 import { slugify } from "@/lib/utils";
 
@@ -68,16 +68,214 @@ function textFromJsonLdCompany(payload: unknown): string {
   return "";
 }
 
-function inferCompanyFromTitle(title: string) {
+function textFromJsonLdJobTitle(payload: unknown): string {
+  if (!payload || typeof payload !== "object") {
+    return "";
+  }
+
+  if (Array.isArray(payload)) {
+    for (const item of payload) {
+      const value = textFromJsonLdJobTitle(item);
+      if (value) {
+        return value;
+      }
+    }
+    return "";
+  }
+
+  const record = payload as Record<string, unknown>;
+  const rawType = record["@type"];
+  const typeLabels = Array.isArray(rawType)
+    ? rawType.map((t) => String(t).toLowerCase())
+    : [String(rawType ?? "").toLowerCase()];
+
+  if (typeLabels.some((t) => t.includes("jobposting"))) {
+    const jobTitle = String(record.title ?? "").trim();
+    if (jobTitle) {
+      return jobTitle;
+    }
+  }
+
+  for (const value of Object.values(record)) {
+    const nested = textFromJsonLdJobTitle(value);
+    if (nested) {
+      return nested;
+    }
+  }
+
+  return "";
+}
+
+function formatJobLocationValue(jl: unknown): string {
+  if (!jl) {
+    return "";
+  }
+
+  if (typeof jl === "string") {
+    return jl.trim();
+  }
+
+  if (Array.isArray(jl)) {
+    for (const item of jl) {
+      const formatted = formatJobLocationValue(item);
+      if (formatted) {
+        return formatted;
+      }
+    }
+
+    return "";
+  }
+
+  if (typeof jl === "object") {
+    const o = jl as Record<string, unknown>;
+    const name = String(o.name ?? "").trim();
+
+    if (name) {
+      return name;
+    }
+
+    const addr = o.address;
+
+    if (addr && typeof addr === "object" && !Array.isArray(addr)) {
+      const a = addr as Record<string, unknown>;
+      const locality = String(a.addressLocality ?? "").trim();
+      const region = String(a.addressRegion ?? "").trim();
+      const country = String(a.addressCountry ?? "").trim();
+      const street = String(a.streetAddress ?? "").trim();
+      const core = [locality, region].filter(Boolean).join(", ");
+
+      if (street && core) {
+        return `${street}, ${core}${country && country.length <= 3 ? `, ${country}` : ""}`.trim();
+      }
+
+      if (core) {
+        return `${core}${country && country.length <= 3 ? `, ${country}` : ""}`.trim();
+      }
+    }
+  }
+
+  return "";
+}
+
+function textFromJsonLdJobLocation(payload: unknown): string {
+  if (!payload || typeof payload !== "object") {
+    return "";
+  }
+
+  if (Array.isArray(payload)) {
+    for (const item of payload) {
+      const value = textFromJsonLdJobLocation(item);
+      if (value) {
+        return value;
+      }
+    }
+
+    return "";
+  }
+
+  const record = payload as Record<string, unknown>;
+  const rawType = record["@type"];
+  const typeLabels = Array.isArray(rawType)
+    ? rawType.map((t) => String(t).toLowerCase())
+    : [String(rawType ?? "").toLowerCase()];
+
+  if (typeLabels.some((t) => t.includes("jobposting"))) {
+    const formatted = formatJobLocationValue(record.jobLocation);
+    if (formatted) {
+      return formatted;
+    }
+  }
+
+  for (const value of Object.values(record)) {
+    const nested = textFromJsonLdJobLocation(value);
+    if (nested) {
+      return nested;
+    }
+  }
+
+  return "";
+}
+
+function pickListingTitle(jsonLdTitle: string, domTitle: string, serpFallback: string): string {
+  const norm = (value: string) => value.replace(/\s+/g, " ").trim();
+  const fromLd = norm(jsonLdTitle);
+  if (fromLd.length >= 2 && fromLd.length <= 240) {
+    return fromLd;
+  }
+  const dom = norm(domTitle);
+  const fb = norm(serpFallback);
+  if (dom.length > 110 && fb.length >= 2 && fb.length < dom.length) {
+    return fb;
+  }
+  if (dom.length >= 2) {
+    return dom;
+  }
+  return fb;
+}
+
+function companyFromAtClause(title: string): string {
+  const cleaned = title.replace(/\s+/g, " ").trim();
+  const match = cleaned.match(/\bat\s+([^()|,–—]+?)(?:\s*[|(]|,|\s+-\s+|$)/i);
+
+  if (!match?.[1]) {
+    return "";
+  }
+
+  return match[1]
+    .trim()
+    .replace(/\s+(remote|hybrid|on[\s-]?site)\s*$/i, "")
+    .trim();
+}
+
+function inferCompanyFromTitle(title: string, locationHint = ""): string {
   const normalized = title.replace(/\s+/g, " ").trim();
   const separators = [" - ", " | ", " @ ", " — ", " – ", " :: ", " : "];
+  const hintNorm = locationHint.replace(/\s+/g, " ").trim().toLowerCase();
+
+  function conflictsWithLocation(candidate: string): boolean {
+    const chunk = candidate.trim().toLowerCase();
+    if (!chunk) {
+      return false;
+    }
+
+    if (!hintNorm) {
+      return /^(remote|hybrid|anywhere|multiple locations)\b/i.test(chunk);
+    }
+
+    if (hintNorm.includes(chunk) || chunk.includes(hintNorm)) {
+      return true;
+    }
+
+    if (/,\s*[a-z]{2}\b(?:\s*\d{5})?\s*$/i.test(candidate.trim())) {
+      return true;
+    }
+
+    if (/^(remote|hybrid|anywhere|multiple locations)\b/i.test(chunk)) {
+      return true;
+    }
+
+    return false;
+  }
 
   for (const separator of separators) {
     const parts = normalized.split(separator).map((part) => part.trim()).filter(Boolean);
 
     if (parts.length > 1) {
-      const candidate = parts[parts.length - 1];
-      if (candidate && !/^(job|careers?|apply|remote|hybrid)$/i.test(candidate)) {
+      let candidate = parts[parts.length - 1];
+
+      if (conflictsWithLocation(candidate)) {
+        if (parts.length > 2) {
+          candidate = parts[parts.length - 2];
+        } else {
+          continue;
+        }
+      }
+
+      if (
+        candidate &&
+        !/^(job|careers?|apply|remote|hybrid|full time|part time)$/i.test(candidate) &&
+        !conflictsWithLocation(candidate)
+      ) {
         return candidate;
       }
     }
@@ -160,76 +358,162 @@ function normalizeCompanyName(value: string) {
   return clean;
 }
 
-export async function parseJobPage(sourceUrl: string, fallback: { title: string; company: string; location: string; snippet: string }) {
-  const response = await fetch(sourceUrl, {
-    headers: {
-      "user-agent": "JobMateBot/0.1"
-    }
-  });
+export async function parseJobHtml(
+  html: string,
+  sourceUrl: string,
+  fallback: { title: string; company: string; location: string; snippet: string },
+  options: {
+    inferCompanyWithLlm?: boolean;
+    geminiApiKey?: string | null;
+    geminiModel?: string | null;
+  } = {}
+) {
+  const inferCompanyWithLlm = options.inferCompanyWithLlm !== false;
+  const $ = cheerio.load(html);
+  const jsonLdScripts = $("script[type='application/ld+json']")
+    .map((_, node) => $(node).contents().text().trim())
+    .get()
+    .filter(Boolean);
 
-  if (!response.ok) {
-    throw new Error(`Unable to fetch listing ${sourceUrl}: ${response.status}`);
+  let jsonLdCompany = "";
+  let jsonLdJobTitle = "";
+  let jsonLdLocation = "";
+
+  for (const raw of jsonLdScripts) {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+
+      if (!jsonLdCompany) {
+        jsonLdCompany = textFromJsonLdCompany(parsed);
+      }
+
+      if (!jsonLdJobTitle) {
+        jsonLdJobTitle = textFromJsonLdJobTitle(parsed);
+      }
+
+      if (!jsonLdLocation) {
+        jsonLdLocation = textFromJsonLdJobLocation(parsed);
+      }
+    } catch {
+    }
+
+    if (jsonLdCompany && jsonLdJobTitle && jsonLdLocation) {
+      break;
+    }
   }
 
-  const html = await response.text();
-  const $ = cheerio.load(html);
-  const jsonLdCompany = $("script[type='application/ld+json']")
-    .map((_, node) => {
-      const raw = $(node).contents().text().trim();
-      if (!raw) {
-        return "";
-      }
-      try {
-        return textFromJsonLdCompany(JSON.parse(raw));
-      } catch {
-        return "";
-      }
-    })
-    .get()
-    .find(Boolean) || "";
-
-  const title =
+  const domTitleRaw =
     $("meta[property='og:title']").attr("content") ||
-    pickContent($, ["h1", "[data-ui='job-title']", ".app-title"]);
+    pickContent($, ["h1", "[data-ui='job-title']", ".app-title"]) ||
+    "";
+
+  const listingText =
+    $("main").text().replace(/\s+/g, " ").trim() || $("body").text().replace(/\s+/g, " ").trim();
+
+  const structuredHints = [
+    jsonLdJobTitle && `jobPostingTitle: ${jsonLdJobTitle}`,
+    jsonLdCompany && `hiringOrganizationName: ${jsonLdCompany}`,
+    jsonLdLocation && `jobPostingLocation: ${jsonLdLocation}`
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  let llmTitle = "";
+  let llmCompany = "";
+  let llmLocation = "";
+
+  if (options.geminiApiKey?.trim()) {
+    const core = await inferJobListingCoreFields(
+      {
+        sourceUrl,
+        listingText,
+        fallback,
+        structuredHints: structuredHints.trim() ? structuredHints : undefined
+      },
+      { apiKey: options.geminiApiKey.trim(), model: options.geminiModel }
+    );
+
+    if (core) {
+      llmTitle = core.title;
+      llmCompany = core.company;
+      llmLocation = core.location;
+    }
+  }
+
+  const title = llmTitle.trim() || pickListingTitle(jsonLdJobTitle, domTitleRaw, fallback.title);
+
   const location =
-    pickContent($, [".location", "[data-ui='location']", ".job-post__location"]);
+    llmLocation.trim() ||
+    (
+      pickContent($, [".location", "[data-ui='location']", ".job-post__location"]) ||
+      ""
+    ).trim() ||
+    jsonLdLocation.trim() ||
+    fallback.location.trim();
+
   const summary = $("meta[name='description']").attr("content") || "";
 
-  const listingText = $("main").text().replace(/\s+/g, " ").trim() || $("body").text().replace(/\s+/g, " ").trim();
-  let company = normalizeCompanyName(
-    pickContent($, [
-      ".company-name",
-      "[data-ui='company-name']",
-      ".job-post__company",
-      "[data-testid='job-detail-company']",
-      "[data-qa='company-name']",
-      ".posting-categories .sort-by-time",
-      ".posting-header__company",
-      ".topcard__org-name-link",
-      ".job-company",
-      ".employer"
-    ]) ||
-    $("meta[name='application-name']").attr("content") ||
-    $("meta[property='og:site_name']").attr("content") ||
-    jsonLdCompany ||
-    extractCompanyFromText(listingText) ||
-    inferCompanyFromTitle(title) ||
-    extractCompanyFromAtsUrl(sourceUrl)
-  );
+  let company = normalizeCompanyName(llmCompany.trim());
 
   if (!company) {
     company = normalizeCompanyName(
-      await inferCompanyNameFromListing({
-        sourceUrl,
-        title,
-        listingText,
-        hints: [extractCompanyFromAtsUrl(sourceUrl), inferCompanyFromTitle(title), $("meta[property='og:site_name']").attr("content") || ""]
-      })
+      pickContent($, [
+        ".company-name",
+        "[data-ui='company-name']",
+        ".job-post__company",
+        "[data-testid='job-detail-company']",
+        "[data-qa='company-name']",
+        ".posting-categories .sort-by-time",
+        ".posting-header__company",
+        ".topcard__org-name-link",
+        ".job-company",
+        ".employer"
+      ]) ||
+        jsonLdCompany ||
+        companyFromAtClause(title) ||
+        $("meta[name='application-name']").attr("content") ||
+        $("meta[property='og:site_name']").attr("content") ||
+        extractCompanyFromText(listingText) ||
+        inferCompanyFromTitle(title, location) ||
+        extractCompanyFromAtsUrl(sourceUrl)
+    );
+  }
+
+  const locNorm = location.replace(/\s+/g, " ").trim().toLowerCase();
+  const compNorm = company.replace(/\s+/g, " ").trim().toLowerCase();
+
+  if (company && locNorm && compNorm && compNorm === locNorm) {
+    company = normalizeCompanyName(
+      jsonLdCompany ||
+        companyFromAtClause(title) ||
+        extractCompanyFromAtsUrl(sourceUrl) ||
+        extractCompanyFromText(listingText) ||
+        inferCompanyFromTitle(title, location)
+    );
+  }
+
+  if (!company && inferCompanyWithLlm) {
+    company = normalizeCompanyName(
+      await inferCompanyNameFromListing(
+        {
+          sourceUrl,
+          title,
+          listingText,
+          hints: [
+            extractCompanyFromAtsUrl(sourceUrl),
+            inferCompanyFromTitle(title, location),
+            $("meta[property='og:site_name']").attr("content") || ""
+          ]
+        },
+        options.geminiApiKey?.trim()
+          ? { apiKey: options.geminiApiKey.trim(), model: options.geminiModel ?? undefined }
+          : undefined
+      )
     );
   }
 
   if (!company) {
-    company = extractCompanyFromAtsUrl(sourceUrl) || inferCompanyFromTitle(title) || "Company";
+    company = extractCompanyFromAtsUrl(sourceUrl) || inferCompanyFromTitle(title, location) || "Company";
   }
 
   if (!title) {
@@ -314,4 +598,19 @@ export async function parseJobPage(sourceUrl: string, fallback: { title: string;
     hiringContacts: extractEmails(html),
     fields
   } satisfies ParsedJobPage;
+}
+
+export async function parseJobPage(sourceUrl: string, fallback: { title: string; company: string; location: string; snippet: string }) {
+  const response = await fetch(sourceUrl, {
+    headers: {
+      "user-agent": "JobMateBot/0.1"
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Unable to fetch listing ${sourceUrl}: ${response.status}`);
+  }
+
+  const html = await response.text();
+  return parseJobHtml(html, sourceUrl, fallback, { inferCompanyWithLlm: true });
 }

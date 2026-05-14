@@ -75,16 +75,19 @@ function getGeminiModels() {
   return Array.from(new Set([primary, GEMINI_FALLBACK_MODEL, GEMINI_STABLE_FALLBACK_MODEL]));
 }
 
-async function callGeminiText(prompt: string, options: { json?: boolean } = {}) {
-  const apiKey = getGeminiApiKey();
+type GeminiUserPart =
+  | { text: string }
+  | { inline_data: { mime_type: string; data: string } };
 
-  if (!apiKey) {
-    throw new Error("No Gemini API key configured.");
-  }
-
+async function callGeminiGenerateWithKey(
+  parts: GeminiUserPart[],
+  apiKey: string,
+  models: string[],
+  options: { json?: boolean } = {}
+): Promise<string> {
   let lastError = "";
 
-  for (const model of getGeminiModels()) {
+  for (const model of models) {
     const response = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
       {
@@ -97,7 +100,7 @@ async function callGeminiText(prompt: string, options: { json?: boolean } = {}) 
           contents: [
             {
               role: "user",
-              parts: [{ text: prompt }]
+              parts
             }
           ],
           generationConfig: options.json
@@ -132,6 +135,20 @@ async function callGeminiText(prompt: string, options: { json?: boolean } = {}) 
   throw new Error(`Gemini request failed. ${lastError}`);
 }
 
+async function callGeminiGenerate(parts: GeminiUserPart[], options: { json?: boolean } = {}) {
+  const apiKey = getGeminiApiKey();
+
+  if (!apiKey) {
+    throw new Error("No Gemini API key configured.");
+  }
+
+  return callGeminiGenerateWithKey(parts, apiKey, getGeminiModels(), options);
+}
+
+async function callGeminiText(prompt: string, options: { json?: boolean } = {}) {
+  return callGeminiGenerate([{ text: prompt }], options);
+}
+
 function hasGeminiKey() {
   return Boolean(getGeminiApiKey());
 }
@@ -149,6 +166,7 @@ export async function generateFieldAnswers(params: {
   listingText: string;
   fields: Array<{ key: string; label: string; type: string; required: boolean; options: string[] }>;
   resumeText?: string;
+  resumePdf?: Buffer | null;
 }) {
   if (!params.fields.length) {
     return [] as FieldAnswer[];
@@ -165,9 +183,12 @@ export async function generateFieldAnswers(params: {
     }));
   }
 
+  const hasPdf = Boolean(params.resumePdf && params.resumePdf.length > 0);
   const prompt = [
     "You are generating direct job application form answers.",
-    "Use only the provided candidate context and resume text.",
+    hasPdf
+      ? "Use only the provided candidate context and the attached resume PDF file."
+      : "Use only the provided candidate context and resume text.",
     "Read each field label carefully and answer that exact question.",
     "Never answer a different question than the field asks.",
     "Be concise, concrete, and truthful.",
@@ -180,15 +201,26 @@ export async function generateFieldAnswers(params: {
     ...COMPENSATION_INSTRUCTIONS,
     "Return valid JSON only with shape {\"answers\":[{\"key\":\"\",\"label\":\"\",\"answer\":\"\",\"reasoning\":\"\"}]}.",
     `Candidate context: ${params.contextBlock}`,
-    params.resumeText ? `Resume text: ${params.resumeText}` : "",
+    !hasPdf && params.resumeText ? `Resume text: ${params.resumeText}` : "",
     `Job listing text: ${params.listingText.slice(0, 8000)}`,
     `Fields: ${JSON.stringify(params.fields)}`
   ]
     .filter(Boolean)
     .join("\n\n");
 
+  const parts: GeminiUserPart[] = [{ text: prompt }];
+
+  if (hasPdf && params.resumePdf) {
+    parts.push({
+      inline_data: {
+        mime_type: "application/pdf",
+        data: params.resumePdf.toString("base64")
+      }
+    });
+  }
+
   try {
-    const text = await callGeminiText(prompt, { json: true });
+    const text = await callGeminiGenerate(parts, { json: true });
     const parsed = parseJsonObject(text) as {
       answers?: Array<{ key: string; label: string; answer: string; reasoning: string }>;
     };
@@ -224,6 +256,7 @@ export async function generateFieldAnswer(params: {
   listingText: string;
   field: { key: string; label: string; type: string; required: boolean; options: string[] };
   resumeText?: string;
+  resumePdf?: Buffer | null;
 }) {
   const fallback = buildFallbackAnswers([params.field.label], params.contextBlock)[0];
 
@@ -238,6 +271,7 @@ export async function generateFieldAnswer(params: {
     };
   }
 
+  const hasPdf = Boolean(params.resumePdf && params.resumePdf.length > 0);
   const prompt = [
     "You are answering exactly one job application form field.",
     "Your first priority is the literal field label. Do not answer any other question.",
@@ -250,7 +284,9 @@ export async function generateFieldAnswer(params: {
     "For yes/no fields, answer exactly 'Yes' or 'No'.",
     "For select, radio, or checkbox fields, answer using the closest available option label from the provided options. If no option fits, return an empty string.",
     ...COMPENSATION_INSTRUCTIONS,
-    "Use only the candidate context and resume text. Be concise, concrete, and truthful.",
+    hasPdf
+      ? "Use only the candidate context and the attached resume PDF file. Be concise, concrete, and truthful."
+      : "Use only the candidate context and resume text. Be concise, concrete, and truthful.",
     "Return valid JSON only: {\"key\":\"\",\"label\":\"\",\"answer\":\"\",\"reasoning\":\"\"}.",
     `Field key: ${params.field.key}`,
     `Field label: ${params.field.label}`,
@@ -258,14 +294,25 @@ export async function generateFieldAnswer(params: {
     `Field required: ${params.field.required}`,
     `Available options: ${JSON.stringify(params.field.options)}`,
     `Candidate context:\n${params.contextBlock}`,
-    params.resumeText ? `Resume text:\n${params.resumeText}` : "",
+    !hasPdf && params.resumeText ? `Resume text:\n${params.resumeText}` : "",
     `Job listing text:\n${params.listingText.slice(0, 8000)}`
   ]
     .filter(Boolean)
     .join("\n\n");
 
+  const parts: GeminiUserPart[] = [{ text: prompt }];
+
+  if (hasPdf && params.resumePdf) {
+    parts.push({
+      inline_data: {
+        mime_type: "application/pdf",
+        data: params.resumePdf.toString("base64")
+      }
+    });
+  }
+
   try {
-    const text = await callGeminiText(prompt, { json: true });
+    const text = await callGeminiGenerate(parts, { json: true });
     const parsed = parseJsonObject(text) as { key?: string; label?: string; answer?: string; reasoning?: string };
 
     return {
@@ -290,60 +337,85 @@ export async function generateFieldAnswer(params: {
   }
 }
 
-export async function generateJobDetailsSummary(params: {
-  title: string;
-  company: string;
-  listingText: string;
-  companyAboutText?: string;
-  fallbackSummary?: string;
-}) {
+export async function generateJobDetailsSummary(
+  params: {
+    title: string;
+    company: string;
+    location: string;
+    listingText: string;
+    fallbackSummary?: string;
+  },
+  gemini?: { apiKey: string; model?: string | null }
+) {
+  const listingSlice = params.listingText.slice(0, 12000);
   const fallback = normalizeGeneratedPlainText(
     [
-      `Work: ${params.fallbackSummary || params.title}`,
+      `Work: ${params.fallbackSummary?.trim() || params.title}`,
       "Stack: Not specified.",
       `Company: ${params.company}.`
     ].join("\n")
   );
 
-  if (!hasGeminiKey()) {
+  const overrideKey = gemini?.apiKey?.trim();
+  const envKey = getGeminiApiKey()?.trim();
+  const apiKey = overrideKey || envKey;
+
+  const prompt = [
+    "Summarize this single job for a candidate details panel.",
+    "Use ONLY the job listing text and the Role, Company, and Location lines below.",
+    "Do not use outside knowledge, other companies, or other job posts.",
+    "Do not invent technologies, duties, or company descriptions not supported by the listing.",
+    "Return exactly three lines with these labels: Work:, Stack:, Company:",
+    "Work: day-to-day responsibilities for THIS role as stated or clearly implied in the listing only.",
+    "Stack: tools, languages, frameworks, or platforms explicitly named in the listing; if none named, write exactly: Stack: Not specified.",
+    "Company: what THIS listing says about the employer or team; if the listing barely describes the company, write exactly: Company: Not specified in listing.",
+    "Keep under 320 characters total. No markdown.",
+    `Role: ${params.title}`,
+    `Company field: ${params.company}`,
+    `Location field: ${params.location}`,
+    `Job listing:\n${listingSlice}`
+  ].join("\n\n");
+
+  if (!apiKey) {
     return fallback;
   }
 
-  const prompt = [
-    "Summarize this job for a candidate's results Details panel.",
-    "Be very brief. Return exactly three short lines with these labels: Work, Stack, Company.",
-    "Work: what the candidate would do day to day.",
-    "Stack: technologies, languages, frameworks, cloud, data, or AI tools mentioned. If sparse, say 'Not specified'.",
-    "Company: what the company does, using company-about context when available.",
-    "No sales language, no full sentences if a compact phrase works, no markdown bullets.",
-    "Keep the full response under 320 characters.",
-    `Role: ${params.title}`,
-    `Company: ${params.company}`,
-    params.companyAboutText ? `Company about text:\n${params.companyAboutText.slice(0, 5000)}` : "",
-    `Job listing:\n${params.listingText.slice(0, 8000)}`
-  ]
-    .filter(Boolean)
-    .join("\n\n");
+  const models = overrideKey
+    ? Array.from(
+        new Set([
+          gemini?.model?.trim() || GEMINI_PRIMARY_MODEL,
+          GEMINI_FALLBACK_MODEL,
+          GEMINI_STABLE_FALLBACK_MODEL
+        ])
+      )
+    : getGeminiModels();
 
   try {
-    const text = await callGeminiText(prompt);
+    const text = await callGeminiGenerateWithKey([{ text: prompt }], apiKey, models);
     return normalizeGeneratedPlainText(text) || fallback;
   } catch {
     return fallback;
   }
 }
 
-export async function inferCompanyNameFromListing(params: {
-  sourceUrl: string;
-  title?: string;
-  listingText: string;
-  hints?: string[];
-}) {
+export async function inferCompanyNameFromListing(
+  params: {
+    sourceUrl: string;
+    title?: string;
+    listingText: string;
+    hints?: string[];
+  },
+  geminiOverride?: { apiKey: string; model?: string | null }
+) {
   const hintBlock = (params.hints ?? []).map((hint) => hint.trim()).filter(Boolean);
+  const apiKey = geminiOverride?.apiKey?.trim() || getGeminiApiKey()?.trim();
 
-  if (!hasGeminiKey()) {
+  if (!apiKey) {
     return hintBlock[0] ?? "";
   }
+
+  const primaryModel = geminiOverride?.model?.trim() || getGeminiModel() || GEMINI_PRIMARY_MODEL;
+  const models = Array.from(new Set([primaryModel, GEMINI_FALLBACK_MODEL, GEMINI_STABLE_FALLBACK_MODEL]));
 
   const prompt = [
     "Identify the employer/company name for this job listing.",
@@ -360,7 +432,9 @@ export async function inferCompanyNameFromListing(params: {
 
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const text = normalizeGeneratedPlainText(await callGeminiText(prompt));
+      const text = normalizeGeneratedPlainText(
+        await callGeminiGenerateWithKey([{ text: prompt }], apiKey, models)
+      );
 
       if (text && !/^unknown\b|^n\/a$|^not specified$/i.test(text)) {
         return text.split("\n")[0].trim();
@@ -370,6 +444,65 @@ export async function inferCompanyNameFromListing(params: {
   }
 
   return hintBlock[0] ?? "";
+}
+
+export async function inferJobListingCoreFields(
+  params: {
+    sourceUrl: string;
+    listingText: string;
+    fallback: { title: string; company: string; location: string; snippet: string };
+    structuredHints?: string;
+  },
+  gemini: { apiKey: string; model?: string | null }
+): Promise<{ title: string; company: string; location: string } | null> {
+  const apiKey = gemini.apiKey.trim();
+
+  if (!apiKey) {
+    return null;
+  }
+
+  const primaryModel = gemini.model?.trim() || getGeminiModel() || GEMINI_PRIMARY_MODEL;
+  const models = Array.from(new Set([primaryModel, GEMINI_FALLBACK_MODEL, GEMINI_STABLE_FALLBACK_MODEL]));
+
+  const hintLines = [
+    params.structuredHints?.trim() ? `Structured data hints from page:\n${params.structuredHints.trim()}` : "",
+    `Search-result fallback (often truncated): title="${params.fallback.title}" company="${params.fallback.company}" location="${params.fallback.location}"`,
+    params.fallback.snippet.trim() ? `Search snippet: ${params.fallback.snippet.trim()}` : ""
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  const prompt = [
+    "Extract exactly three fields from this job listing.",
+    "Return JSON only: {\"title\":\"\",\"company\":\"\",\"location\":\"\"}.",
+    "title: job role only (e.g. Software Engineer). Exclude employer name and location from title.",
+    "company: legal or brand employer name that is hiring. Must not be a city, state, region, or country alone.",
+    "location: workplace location as stated (city/state/country, multiple locations, or Remote/Hybrid).",
+    "Ground every value in the listing text or structured hints. Do not invent employers.",
+    "If uncertain for a field use empty string for that field.",
+    `Listing URL: ${params.sourceUrl}`,
+    hintLines,
+    `Listing body text:\n${params.listingText.slice(0, 14000)}`
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  try {
+    const text = await callGeminiGenerateWithKey([{ text: prompt }], apiKey, models, { json: true });
+    const parsed = parseJsonObject(text) as {
+      title?: unknown;
+      company?: unknown;
+      location?: unknown;
+    };
+
+    return {
+      title: String(parsed.title ?? "").trim(),
+      company: String(parsed.company ?? "").trim(),
+      location: String(parsed.location ?? "").trim()
+    };
+  } catch {
+    return null;
+  }
 }
 
 export async function generateFormAnswers(params: {
@@ -384,15 +517,19 @@ export async function generateFormAnswers(params: {
     options: string[];
   }>;
   resumeText?: string;
+  resumePdf?: Buffer | null;
   coverLetterText?: string;
   writingSample?: string;
   attemptNote?: string;
+  gemini?: { apiKey: string; model?: string | null };
 }) {
   if (!params.fields.length) {
     return new Map<string, { answer: string; reasoning: string }>();
   }
 
-  if (!hasGeminiKey()) {
+  const geminiApiKey = params.gemini?.apiKey?.trim() || getGeminiApiKey()?.trim();
+
+  if (!geminiApiKey) {
     return new Map<string, { answer: string; reasoning: string }>(
       params.fields.map((field) => [
         field.fieldId,
@@ -404,14 +541,22 @@ export async function generateFormAnswers(params: {
     );
   }
 
+  const primaryModel = params.gemini?.model?.trim() || getGeminiModel() || GEMINI_PRIMARY_MODEL;
+  const models = Array.from(new Set([primaryModel, GEMINI_FALLBACK_MODEL, GEMINI_STABLE_FALLBACK_MODEL]));
+
+  const hasPdf = Boolean(params.resumePdf && params.resumePdf.length > 0);
   const prompt = [
     "You are filling a job application form.",
     "You will receive the entire visible form as JSON. Each field has a fieldId. Return answers keyed by the same fieldId.",
     "Read every field label literally. Do not move an answer from one field to another.",
     "For every answer, first identify what that exact field label is asking. The answer must fit that exact field label and its options.",
     "You must return exactly one answers item for every field in Fields JSON.",
-    "For required non-demographic fields, an empty answer is invalid. Use the candidate context and resume to answer them.",
-    "Identity fields are mandatory when present: Full name must use the candidate name, Email must use the candidate email, Phone must use the candidate phone if present in context or resume.",
+    hasPdf
+      ? "For required non-demographic fields, an empty answer is invalid. Use the candidate context and the attached resume PDF to answer them."
+      : "For required non-demographic fields, an empty answer is invalid. Use the candidate context and resume to answer them.",
+    hasPdf
+      ? "Identity fields are mandatory when present: Full name must use the candidate name, Email must use the candidate email, Phone must use the candidate phone if present in context or resume PDF."
+      : "Identity fields are mandatory when present: Full name must use the candidate name, Email must use the candidate email, Phone must use the candidate phone if present in context or resume.",
     "If a field asks for current location/city/state, answer only the location value, for example 'Chicago, IL'.",
     "Location answers must be under 80 characters.",
     "If a field asks how the candidate heard about the job, answer exactly 'Google'.",
@@ -435,7 +580,7 @@ export async function generateFormAnswers(params: {
     params.attemptNote ? `Critical retry note:\n${params.attemptNote}` : "",
     `Fields JSON:\n${JSON.stringify(params.fields)}`,
     `Candidate context:\n${params.contextBlock}`,
-    params.resumeText ? `Resume text:\n${params.resumeText}` : "",
+    !hasPdf && params.resumeText ? `Resume text:\n${params.resumeText}` : "",
     params.coverLetterText ? `Cover letter text:\n${params.coverLetterText}` : "",
     params.writingSample ? `Candidate writing sample:\n${params.writingSample.slice(0, 6000)}` : "",
     `Job listing text:\n${params.listingText.slice(0, 8000)}`
@@ -443,8 +588,19 @@ export async function generateFormAnswers(params: {
     .filter(Boolean)
     .join("\n\n");
 
+  const parts: GeminiUserPart[] = [{ text: prompt }];
+
+  if (hasPdf && params.resumePdf) {
+    parts.push({
+      inline_data: {
+        mime_type: "application/pdf",
+        data: params.resumePdf.toString("base64")
+      }
+    });
+  }
+
   try {
-    const text = await callGeminiText(prompt, { json: true });
+    const text = await callGeminiGenerateWithKey(parts, geminiApiKey, models, { json: true });
     const parsed = parseJsonObject(text) as {
       answers?: Array<{ fieldId?: string; answer?: string; reasoning?: string }>;
     };
@@ -513,7 +669,8 @@ export async function classifyApplicationFieldIntent(params: {
 
 export async function generateTailoredCoverLetterText(params: {
   profileBlock: string;
-  resumeText: string;
+  resumeText?: string;
+  resumePdf?: Buffer | null;
   listingText: string;
   writingSample?: string;
   coverLetterTemplate?: string;
@@ -541,9 +698,12 @@ export async function generateTailoredCoverLetterText(params: {
     return fallback;
   }
 
+  const hasPdf = Boolean(params.resumePdf && params.resumePdf.length > 0);
   const prompt = [
     "Write a concise, truthful cover letter tailored to this job.",
-    "Use only the candidate profile and existing resume text. Do not invent employers, degrees, dates, or metrics.",
+    hasPdf
+      ? "Use only the candidate profile and the attached resume PDF. Do not invent employers, degrees, dates, or metrics."
+      : "Use only the candidate profile and existing resume text. Do not invent employers, degrees, dates, or metrics.",
     "Use the candidate writing sample as the style reference: sentence rhythm, directness, vocabulary, and level of formality should follow that sample.",
     "Replace the relevant experience described in this with experience the user acutally has in their work history that's relevant to this role.",
     "If a cover letter template is provided, use it as the main structure, tone, and length reference. You may adapt wording and details for the role, but stay close to its general feel.",
@@ -557,7 +717,7 @@ export async function generateTailoredCoverLetterText(params: {
     `Target role: ${params.roleTitle}`,
     `Company: ${params.company}`,
     `Candidate profile:\n${params.profileBlock}`,
-    params.resumeText ? `Existing resume text:\n${params.resumeText}` : "",
+    !hasPdf && params.resumeText ? `Existing resume text:\n${params.resumeText}` : "",
     params.coverLetterTemplate ? `Cover letter template for tone, structure, and length:\n${params.coverLetterTemplate.slice(0, 6000)}` : "",
     params.writingSample ? `Candidate writing sample for style:\n${params.writingSample.slice(0, 6000)}` : "",
     params.companyAboutText ? `Company about/context page text:\n${params.companyAboutText.slice(0, 7000)}` : "",
@@ -566,8 +726,19 @@ export async function generateTailoredCoverLetterText(params: {
     .filter(Boolean)
     .join("\n\n");
 
+  const parts: GeminiUserPart[] = [{ text: prompt }];
+
+  if (hasPdf && params.resumePdf) {
+    parts.push({
+      inline_data: {
+        mime_type: "application/pdf",
+        data: params.resumePdf.toString("base64")
+      }
+    });
+  }
+
   try {
-    const text = await callGeminiText(prompt);
+    const text = await callGeminiGenerate(parts);
     return normalizeGeneratedPlainText(text) || fallback;
   } catch {
     return fallback;
@@ -576,7 +747,8 @@ export async function generateTailoredCoverLetterText(params: {
 
 export async function generateHiringContactEmail(params: {
   profileBlock: string;
-  resumeText: string;
+  resumeText?: string;
+  resumePdf?: Buffer | null;
   listingText: string;
   company: string;
   roleTitle: string;
@@ -612,11 +784,14 @@ export async function generateHiringContactEmail(params: {
     return { subject, body: fallbackBody };
   }
 
+  const hasPdf = Boolean(params.resumePdf && params.resumePdf.length > 0);
   const prompt = [
     params.followUp
       ? "Write a short plain-text follow-up email to a hiring contact after the candidate applied a few days ago."
       : "Write a short plain-text email to a hiring contact about a job application.",
-    "Use the candidate context and resume only. Do not invent facts.",
+    hasPdf
+      ? "Use the candidate context and the attached resume PDF only. Do not invent facts."
+      : "Use the candidate context and resume only. Do not invent facts.",
     "Keep it direct and human. Under 120 words.",
     "Use plain ASCII punctuation only.",
     `Write the email in ${language === "fr" ? "French" : "English"}.`,
@@ -625,14 +800,25 @@ export async function generateHiringContactEmail(params: {
     `Role: ${params.roleTitle}`,
     `Company: ${params.company}`,
     `Candidate context:\n${params.profileBlock}`,
-    params.resumeText ? `Resume text:\n${params.resumeText.slice(0, 6000)}` : "",
+    !hasPdf && params.resumeText ? `Resume text:\n${params.resumeText.slice(0, 6000)}` : "",
     `Job listing:\n${params.listingText.slice(0, 6000)}`
   ]
     .filter(Boolean)
     .join("\n\n");
 
+  const parts: GeminiUserPart[] = [{ text: prompt }];
+
+  if (hasPdf && params.resumePdf) {
+    parts.push({
+      inline_data: {
+        mime_type: "application/pdf",
+        data: params.resumePdf.toString("base64")
+      }
+    });
+  }
+
   try {
-    const text = await callGeminiText(prompt, { json: true });
+    const text = await callGeminiGenerate(parts, { json: true });
     const parsed = parseJsonObject(text) as { subject?: string; body?: string };
     return {
       subject: normalizeGeneratedPlainText(parsed.subject ?? subject) || subject,

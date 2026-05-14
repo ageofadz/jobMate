@@ -129,9 +129,13 @@ async function ensureCoverLetter(entry: Entry, fields: LiveField[]) {
   }
 
   const companyAboutText = await fetchCompanyAboutContext(entry.payload.companyHomepage);
+  const resumePdf = entry.payload.resumeUpload?.base64
+    ? Buffer.from(entry.payload.resumeUpload.base64, "base64")
+    : null;
   const coverLetterText = await generateTailoredCoverLetterText({
     profileBlock: entry.payload.contextBlock,
-    resumeText: entry.payload.resumeText,
+    resumeText: resumePdf ? undefined : entry.payload.resumeText,
+    resumePdf,
     listingText: entry.payload.listingText,
     writingSample: entry.payload.writingSample,
     coverLetterTemplate: entry.payload.coverLetterTemplate,
@@ -191,11 +195,15 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
     const body = (await readJson(req)) as { fields?: LiveField[] };
     const fields = body.fields ?? [];
     await ensureCoverLetter(entry, fields);
+    const resumePdf = entry.payload.resumeUpload?.base64
+      ? Buffer.from(entry.payload.resumeUpload.base64, "base64")
+      : null;
     const answers = await generateFormAnswers({
       contextBlock: entry.payload.contextBlock,
       listingText: entry.payload.listingText,
       fields,
-      resumeText: entry.payload.resumeText,
+      resumeText: resumePdf ? undefined : entry.payload.resumeText,
+      resumePdf,
       coverLetterText: entry.payload.coverLetterText,
       writingSample: entry.payload.writingSample
     });

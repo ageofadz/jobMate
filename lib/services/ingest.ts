@@ -1,31 +1,30 @@
 import { randomUUID } from "node:crypto";
 
+import { normalizeApplyUrl } from "@/lib/apply-url";
 import { reportError } from "@/cli/report-error";
 import { ensureIndexes, getSqlite } from "@/lib/db";
-import { formatProfileForPrompt, getUserProfile, loadResumeText } from "@/lib/data";
+import { formatProfileForPrompt, getUserProfile, loadResumePdfPayload } from "@/lib/data";
 import { writeUploadedFile } from "@/lib/files";
 import { buildGeneratedKeywords, buildSearchQueries } from "@/lib/services/keywords";
 import { generateFieldAnswers, generateJobDetailsSummary } from "@/lib/services/llm";
 import { buildCoverLetterDocx } from "@/lib/services/docx";
-import { fetchCompanyAboutContext } from "@/lib/services/company-about";
 import { enrichJobLeadMetadata } from "@/lib/services/job-enrichment";
 import { parseJobPage } from "@/lib/services/job-page";
 import { sendDigestNotification } from "@/lib/services/notifications";
 import { searchGoogleListings } from "@/lib/services/serp";
 import type { JobRecord, PreferenceRecord } from "@/lib/types";
 import { nowInTimezoneParts } from "@/lib/utils";
-import type { PreferenceInput } from "@/lib/validators";
-
-export function enrichPreferenceInput(input: PreferenceInput) {
-  return {
-    ...input,
-    generatedKeywords: buildGeneratedKeywords(input),
-    searchQueries: buildSearchQueries(input)
-  };
-}
 
 export type IngestionProgress =
   | { stage: "target"; targetTitle: string; targetIndex: number; targetTotal: number }
+  | {
+      stage: "serp_queries";
+      targetTitle: string;
+      targetIndex: number;
+      targetTotal: number;
+      completed: number;
+      total: number;
+    }
   | { stage: "retrieved"; targetTitle: string; targetIndex: number; targetTotal: number; retrieved: number; limit: number }
   | { stage: "processing"; targetTitle: string; targetIndex: number; targetTotal: number; processed: number; retrieved: number; created: number }
   | { stage: "inserted"; targetTitle: string; targetIndex: number; targetTotal: number; jobId: string; created: number; processed: number; retrieved: number }
@@ -67,23 +66,20 @@ export async function runIngestion(options: {
       searchAfterDays: preference.searchAfterDays,
       contextBlock: preference.contextBlock,
       timezone: preference.timezone,
-      scheduleHourLocal: preference.scheduleHourLocal,
-      resumeAssetId: preference.resumeAssetId ?? null
+      scheduleHourLocal: preference.scheduleHourLocal
     });
 
-    let queryRetrieved = 0;
     const candidates = await searchGoogleListings(searchQueries, {
       limit: perTargetLimit,
       boardDomains: preference.boardDomains,
-      onQueryDone: (_query, count) => {
-        queryRetrieved = Math.min(perTargetLimit, queryRetrieved + count);
+      onQueryDone: (_query, _count, meta) => {
         options.onProgress?.({
-          stage: "retrieved",
+          stage: "serp_queries",
           targetTitle: preference.title,
           targetIndex: prefIndex + 1,
           targetTotal: prefs.length,
-          retrieved: queryRetrieved,
-          limit: perTargetLimit
+          completed: meta.completedQueries,
+          total: meta.totalQueries
         });
       }
     });
@@ -96,8 +92,9 @@ export async function runIngestion(options: {
       retrieved: candidates.length,
       limit: perTargetLimit
     });
-    const resumeText = await loadResumeText(preference.userId, preference.resumeAssetId ?? undefined);
     const profile = getUserProfile(preference.userId);
+    const profileResumeId = profile?.resumeAssetId ?? null;
+    const resumePdf = loadResumePdfPayload(preference.userId, profileResumeId)?.buffer ?? null;
     const profileBlock = profile ? formatProfileForPrompt(profile) : "";
     const mergedContextBase = [profileBlock, preference.contextBlock].filter((s) => s.trim().length > 0).join("\n\n---\n\n");
     const digestDate = localNow.date;
@@ -143,11 +140,59 @@ export async function runIngestion(options: {
         snippet: candidate.snippet
       });
 
+      const applyNorm = normalizeApplyUrl(parsed.applyUrl);
+
+      const dupApplyRows = db
+        .prepare(`SELECT id, status FROM jobs WHERE user_id = ? AND apply_url = ?`)
+        .all(preference.userId, applyNorm) as { id: string; status: string }[];
+
+      if (dupApplyRows.length > 0) {
+        const hasApplied = dupApplyRows.some((r) => r.status === "applied");
+
+        if (hasApplied) {
+          processed += 1;
+          options.onProgress?.({
+            stage: "processing",
+            targetTitle: preference.title,
+            targetIndex: prefIndex + 1,
+            targetTotal: prefs.length,
+            processed,
+            retrieved: candidates.length,
+            created: createdForTarget
+          });
+          return;
+        }
+
+        const openDup = dupApplyRows.find((r) => r.status === "new" || r.status === "reviewed");
+
+        if (openDup) {
+          const now = new Date().toISOString();
+          db.prepare(
+            `UPDATE jobs
+             SET preference_id = ?, digest_date = ?, status = 'new', archived_at = NULL, updated_at = ?
+             WHERE id = ? AND user_id = ?`
+          ).run(preference._id as string, digestDate, now, openDup.id, preference.userId);
+          digestJobIds.push(openDup.id);
+          processed += 1;
+          createdForTarget += 1;
+          options.onProgress?.({
+            stage: "processing",
+            targetTitle: preference.title,
+            targetIndex: prefIndex + 1,
+            targetTotal: prefs.length,
+            processed,
+            retrieved: candidates.length,
+            created: createdForTarget
+          });
+          return;
+        }
+      }
+
       let formFields = parsed.fields;
       const listingNorm = candidate.sourceUrl.replace(/[#?].*$/, "");
-      const applyNorm = parsed.applyUrl.replace(/[#?].*$/, "");
+      const applyNormStrip = applyNorm.replace(/[#?].*$/, "");
 
-      if (applyNorm !== listingNorm) {
+      if (applyNormStrip !== listingNorm) {
         try {
           const applyParsed = await parseJobPage(parsed.applyUrl, {
             title: candidate.sourceTitle,
@@ -167,7 +212,7 @@ export async function runIngestion(options: {
         contextBlock: mergedContextBase,
         listingText: parsed.listingText,
         fields: formFields,
-        resumeText
+        resumePdf
       });
 
       const leadMetadata = await enrichJobLeadMetadata({
@@ -177,12 +222,11 @@ export async function runIngestion(options: {
         parsedHomepage: parsed.companyHomepage ?? null,
         parsedLinkedinLinks: parsed.linkedinLinks ?? []
       });
-      const companyAboutText = await fetchCompanyAboutContext(leadMetadata.companyHomepage ?? parsed.companyHomepage ?? null);
       const detailSummary = await generateJobDetailsSummary({
         title: parsed.title,
         company: parsed.company,
+        location: parsed.location,
         listingText: parsed.listingText,
-        companyAboutText,
         fallbackSummary: parsed.summary
       });
 
@@ -248,9 +292,9 @@ export async function runIngestion(options: {
         JSON.stringify(leadMetadata.hiringContacts.length ? leadMetadata.hiringContacts : parsed.hiringContacts ?? []),
         detailSummary,
         parsed.listingText,
-        parsed.applyUrl,
+        applyNorm,
         JSON.stringify(fieldAnswers),
-        preference.resumeAssetId ?? null,
+        profileResumeId,
         coverLetterAssetId,
         "new",
         now,
@@ -278,9 +322,9 @@ export async function runIngestion(options: {
         hiringContacts: leadMetadata.hiringContacts.length ? leadMetadata.hiringContacts : parsed.hiringContacts ?? [],
         summary: detailSummary,
         listingText: parsed.listingText,
-        applyUrl: parsed.applyUrl,
+        applyUrl: applyNorm,
         fields: fieldAnswers,
-        resumeAssetId: preference.resumeAssetId ?? null,
+        resumeAssetId: profileResumeId,
         coverLetterAssetId,
         status: "new",
         discoveredAt: new Date(now),
@@ -431,7 +475,6 @@ function preferenceRowToRecord(row: PreferenceSqlRow): PreferenceRecord & { _id:
     contextBlock: row.context_block,
     timezone: row.timezone,
     scheduleHourLocal: row.schedule_hour_local,
-    resumeAssetId: row.resume_asset_id ?? null,
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at)
   };

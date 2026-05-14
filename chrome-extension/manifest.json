@@ -1,14 +1,22 @@
 {
   "manifest_version": 3,
   "name": "JobMate Form Filler",
-  "version": "0.1.0",
-  "description": "Reads live application form labels and types JobMate answers into the page.",
-  "permissions": [],
-  "host_permissions": ["<all_urls>"],
+  "version": "0.2.0",
+  "description": "In-browser Google job search, JobMate apply autofill, and API proxy for localhost.",
+  "permissions": ["tabs", "scripting"],
+  "host_permissions": ["<all_urls>", "http://localhost/*", "http://127.0.0.1/*", "https://localhost/*", "https://127.0.0.1/*", "https://www.google.com/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
   "content_scripts": [
     {
+      "matches": ["http://localhost/*", "http://127.0.0.1/*", "https://localhost/*", "https://127.0.0.1/*"],
+      "js": ["jobmate-bridge.js"],
+      "run_at": "document_idle"
+    },
+    {
       "matches": ["<all_urls>"],
-      "js": ["content.js"],
+      "js": ["apply-fill.js"],
       "run_at": "document_idle"
     }
   ]

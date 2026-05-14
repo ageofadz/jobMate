@@ -24,7 +24,6 @@ export type PreferenceRecord = {
   contextBlock: string;
   timezone: string;
   scheduleHourLocal: number;
-  resumeAssetId?: string | null;
   createdAt: Date;
   updatedAt: Date;
 };

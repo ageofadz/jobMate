@@ -8,8 +8,7 @@ export const preferenceInputSchema = z.object({
   searchAfterDays: z.number().int().min(1).max(365).default(14),
   contextBlock: z.string().trim().default(""),
   timezone: z.string().trim().min(3).default("America/Chicago"),
-  scheduleHourLocal: z.number().int().min(0).max(23).default(9),
-  resumeAssetId: z.string().trim().optional().nullable()
+  scheduleHourLocal: z.number().int().min(0).max(23).default(9)
 });
 
 export type PreferenceInput = z.infer<typeof preferenceInputSchema>;
