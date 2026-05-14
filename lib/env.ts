@@ -1,30 +1,35 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
-import { z } from "zod";
+let dataRoot: string | null = null;
 
-const envSchema = z.object({
-  './data': z.string().min(1).default("./data")
-});
-
-let cachedEnv: z.infer<typeof envSchema> | null = null;
+function ensureDataLayout() {
+  if (dataRoot) {
+    return;
+  }
+  const raw = process.env.JOBMATE_DATA_DIR?.trim();
+  if (raw) {
+    dataRoot = path.isAbsolute(raw) ? raw : path.resolve(process.cwd(), raw);
+  } else if (process.env.VERCEL === "1") {
+    dataRoot = path.join(os.tmpdir(), "jobmate-data");
+  } else {
+    dataRoot = path.join(process.cwd(), "data");
+  }
+  fs.mkdirSync(dataRoot, { recursive: true });
+}
 
 export function getEnv() {
-  if (!cachedEnv) {
-    cachedEnv = envSchema.parse(process.env);
-    const root = path.resolve(process.cwd());
-    fs.mkdirSync(root, { recursive: true });
-    fs.mkdirSync(path.join(root, "files"), { recursive: true });
-    cachedEnv = { ...cachedEnv, './data': root };
-  }
-
-  return cachedEnv;
+  ensureDataLayout();
+  return { "./data": dataRoot! };
 }
 
 export function getSqlitePath() {
-  return path.join(getFilesDir(), "jobmate.sqlite");
+  ensureDataLayout();
+  return path.join(dataRoot!, "jobmate.sqlite");
 }
 
 export function getFilesDir() {
-  return path.join('./data');
+  ensureDataLayout();
+  return dataRoot!;
 }
