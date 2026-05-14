@@ -890,10 +890,6 @@ function HomePanel(props: {
         >
           {ingestRunning ? "Running search pipeline…" : "Run search pipeline"}
         </button>
-        <p className="mt-2 text-xs text-gray-600 dark:text-gray-400">
-          Discovery uses the JobMate Chrome extension for in-browser Google when available; otherwise SerpApi via server routes.
-          Listing HTML is fetched server-side; parsing and Gemini field answers run in the browser.
-        </p>
       </section>
     </div>
   );
@@ -1623,9 +1619,6 @@ function ConfigPanel(props: {
 
       <section className="rounded-xl border border-gray-200 p-4 dark:border-gray-800">
         <h3 className="text-sm font-semibold">Resume PDF</h3>
-        <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">
-          One resume per profile, stored with your SQLite data in this browser. The PDF is attached for Gemini when generating application answers.
-        </p>
         <p className="mt-2 text-sm text-gray-800 dark:text-gray-200">
           {resumeLabel ? `Current file: ${resumeLabel}` : "No resume on profile yet."}
         </p>
