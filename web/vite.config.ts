@@ -4,15 +4,22 @@ import { reactRouter } from "@react-router/dev/vite";
 import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "vite";
 
-const jobmateRoot = path.resolve(import.meta.dirname, "..");
+const webRoot = import.meta.dirname;
+const jobmateRoot = path.resolve(webRoot, "..");
+const webNodeModules = path.join(webRoot, "node_modules");
+const nm = (pkg: string) => path.join(webNodeModules, pkg);
 
 export default defineConfig({
   plugins: [tailwindcss(), reactRouter()],
   resolve: {
     tsconfigPaths: true,
     alias: {
-      "@": jobmateRoot
-    }
+      "@": jobmateRoot,
+      zod: nm("zod"),
+      cheerio: nm("cheerio"),
+      docx: nm("docx"),
+      "better-sqlite3": nm("better-sqlite3"),
+    },
   },
   ssr: {
     external: ["better-sqlite3"]
