@@ -1,5 +1,7 @@
 import * as cheerio from "cheerio";
 
+import { listingHtmlHeaders } from "@/lib/listing-html-headers";
+
 function withTimeout(ms: number) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ms);
@@ -31,9 +33,7 @@ async function fetchReadableText(url: string) {
   try {
     const response = await fetch(url, {
       signal: timeout.controller.signal,
-      headers: {
-        "user-agent": "JobMateBot/0.1"
-      }
+      headers: listingHtmlHeaders
     });
 
     const contentType = response.headers.get("content-type") ?? "";

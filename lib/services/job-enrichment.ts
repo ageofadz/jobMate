@@ -1,5 +1,6 @@
 import type { OrganicSearchResult } from "@/lib/services/serp-shared";
 import { searchGoogleOrganic } from "@/lib/services/serp";
+import { listingHtmlHeaders } from "@/lib/listing-html-headers";
 
 const ATS_HOSTS = [
   "greenhouse.io",
@@ -76,7 +77,7 @@ function isLikelyCompanyHomepage(url: string) {
 async function extractCompanyPageSignals(url: string) {
   try {
     const response = await fetch(url, {
-      headers: { "user-agent": "JobMateBot/0.1" },
+      headers: listingHtmlHeaders,
       signal: AbortSignal.timeout(12000)
     });
 

@@ -1,5 +1,7 @@
 import type { ActionFunctionArgs } from "react-router";
 
+import { listingHtmlHeaders } from "@/lib/listing-html-headers";
+
 function isAllowedListingUrl(urlString: string) {
   let url: URL;
 
@@ -42,19 +44,33 @@ export async function action({ request }: ActionFunctionArgs) {
     return Response.json({ error: "URL not allowed" }, { status: 400 });
   }
 
-  const res = await fetch(url, {
-    headers: {
-      "user-agent": "JobMateBot/0.1"
-    },
-    redirect: "follow"
-  });
+  try {
+    const res = await fetch(url, {
+      headers: listingHtmlHeaders,
+      redirect: "follow",
+      signal: AbortSignal.timeout(90_000)
+    });
 
-  const html = await res.text();
+    const html = await res.text();
 
-  return Response.json({
-    ok: res.ok,
-    status: res.status,
-    finalUrl: res.url,
-    html
-  });
+    return Response.json({
+      ok: res.ok,
+      status: res.status,
+      finalUrl: res.url,
+      html
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+
+    return Response.json(
+      {
+        ok: false,
+        status: 0,
+        finalUrl: url,
+        html: "",
+        error: `upstream: ${message}`
+      },
+      { status: 502 }
+    );
+  }
 }

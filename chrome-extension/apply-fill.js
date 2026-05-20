@@ -38,6 +38,8 @@
   const norm = (value) => clean(value).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
   const demographicPattern = /\b(pronouns?|race|ethnicity|gender|disabilit(?:y|ies)|veteran|eeo|equal opportunity|hispanic|latino|self identify|self-identify)\b/i;
   const optOutPattern = /\b(do not wish|don't wish|do not want|don't want|prefer not|decline|choose not|not disclose|no answer|wish not)\b/i;
+  const coverRegionPattern =
+    /\bcover\b|cover letter|letter of interest|lettre de motivation|supporting (?:letter|doc|document|statement)|statement of interest/i;
 
   function labelledText(node) {
     const id = node.getAttribute("id");
@@ -88,6 +90,77 @@
     return direct || node.getAttribute("name") || node.getAttribute("id") || node.getAttribute("placeholder") || "Field";
   }
 
+  function isCoverLetterRegion(node) {
+    let p = node;
+
+    for (let d = 0; d < 14 && p; d++) {
+      const block = clean(p.textContent || "").slice(0, 500);
+
+      if (coverRegionPattern.test(block)) {
+        return true;
+      }
+
+      p = p.parentElement;
+    }
+
+    return false;
+  }
+
+  async function revealCoverLetterTextFields() {
+    const sel = 'button, [role="button"], a, [role="tab"], [role="radio"], input[type="button"]';
+    const nodes = Array.from(document.querySelectorAll(sel));
+
+    for (const el of nodes) {
+      if (!isCoverLetterRegion(el)) {
+        continue;
+      }
+
+      const t = clean((el.textContent || el.getAttribute("aria-label") || "").replace(/\s+/g, " ")).slice(0, 120);
+
+      if (!t || t.length > 100) {
+        continue;
+      }
+
+      if (
+        /\b(upload|attach|browse|choose file|drop|file|pdf|docx?)\b/i.test(t) &&
+        !/\b(text|type|paste|enter|manually|write)\b/i.test(t)
+      ) {
+        continue;
+      }
+
+      if (
+        /\b(text|type|paste|enter|manually|write|plain|free[\s-]?form|sans fichier|coller|saisir)\b/i.test(t) ||
+        /^text$/i.test(t)
+      ) {
+        el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, view: window }));
+        await sleep(80);
+      }
+    }
+  }
+
+  function fileFieldContextLabel(input) {
+    const n = nearbyLabel(input);
+    let blob = norm(n);
+
+    if (coverRegionPattern.test(n)) {
+      return blob;
+    }
+
+    let p = input.parentElement;
+
+    for (let d = 0; d < 14 && p; d++) {
+      const block = clean(p.textContent || "").slice(0, 450);
+
+      if (coverRegionPattern.test(block)) {
+        return norm(block);
+      }
+
+      p = p.parentElement;
+    }
+
+    return blob;
+  }
+
   function groupOptions(node, type) {
     const name = node.getAttribute("name");
     const group = name
@@ -99,52 +172,78 @@
 
   function controls() {
     const seen = new Set();
+    const items = [];
+    let fieldSeq = 0;
 
-    return Array.from(document.querySelectorAll("input, textarea, select"))
-      .map((node, index) => {
-        const tag = node.tagName.toLowerCase();
-        const type = tag === "input" ? String(node.type || "text").toLowerCase() : tag;
+    function pushField(node, type, tag) {
+      if (/captcha/i.test(`${node.getAttribute("name") || ""} ${node.id || ""}`)) {
+        return;
+      }
 
-        if (["hidden", "button", "submit", "reset", "image"].includes(type)) {
-          return null;
+      const key = node.getAttribute("name") || node.id || `field_${fieldSeq}`;
+      const groupKey = type === "radio" || type === "checkbox" ? `${type}:${key}` : "";
+
+      if (groupKey && seen.has(groupKey)) {
+        return;
+      }
+
+      if (groupKey) {
+        seen.add(groupKey);
+      }
+
+      const fieldId = `jm_${fieldSeq}_${key.replace(/[^a-zA-Z0-9_-]+/g, "_").slice(0, 60)}`;
+      fieldSeq += 1;
+      node.dataset.jobmateFieldId = fieldId;
+      const lab = nearbyLabel(node);
+
+      items.push({
+        node,
+        field: {
+          fieldId,
+          key,
+          label: lab,
+          type,
+          required:
+            (node.required === true || String(node.getAttribute("aria-required") || "") === "true") ||
+            /✱|\*|required/i.test(lab),
+          options:
+            tag === "select"
+              ? Array.from(node.options).map((option) => clean(option.label || option.text || option.value)).filter(Boolean)
+              : type === "radio" || type === "checkbox"
+                ? groupOptions(node, type)
+                : []
         }
+      });
+    }
 
-        if (/captcha/i.test(`${node.name || ""} ${node.id || ""}`)) {
-          return null;
-        }
+    for (const node of document.querySelectorAll("input, textarea, select")) {
+      const tag = node.tagName.toLowerCase();
+      const type = tag === "input" ? String(node.type || "text").toLowerCase() : tag;
 
-        const key = node.name || node.id || `field_${index}`;
-        const groupKey = type === "radio" || type === "checkbox" ? `${type}:${key}` : "";
+      if (["hidden", "button", "submit", "reset", "image"].includes(type)) {
+        continue;
+      }
 
-        if (groupKey && seen.has(groupKey)) {
-          return null;
-        }
+      pushField(node, type, tag);
+    }
 
-        if (groupKey) {
-          seen.add(groupKey);
-        }
+    for (const node of document.querySelectorAll("[contenteditable=true]")) {
+      if (node.querySelector("[contenteditable=true]")) {
+        continue;
+      }
 
-        const fieldId = `jm_${index}_${key.replace(/[^a-zA-Z0-9_-]+/g, "_").slice(0, 60)}`;
-        node.dataset.jobmateFieldId = fieldId;
+      if (node.querySelector("input, textarea, select")) {
+        continue;
+      }
 
-        return {
-          node,
-          field: {
-            fieldId,
-            key,
-            label: nearbyLabel(node),
-            type,
-            required: node.required || /✱|\*|required/i.test(nearbyLabel(node)),
-            options:
-              tag === "select"
-                ? Array.from(node.options).map((option) => clean(option.label || option.text || option.value)).filter(Boolean)
-                : type === "radio" || type === "checkbox"
-                  ? groupOptions(node, type)
-                  : []
-          }
-        };
-      })
-      .filter(Boolean);
+      if (!isCoverLetterRegion(node) && !coverRegionPattern.test(nearbyLabel(node))) {
+        continue;
+      }
+
+      pushField(node, "contenteditable", "div");
+    }
+
+    return items;
   }
 
   function setNativeValue(node, value) {
@@ -209,7 +308,7 @@
     const cover = payload.coverUpload ? base64ToFile(payload.coverUpload) : null;
 
     fileInputs.forEach((input, index) => {
-      const label = norm(nearbyLabel(input));
+      const label = fileFieldContextLabel(input);
       const transfer = new DataTransfer();
 
       if (/cover/.test(label) && cover) {
@@ -236,6 +335,16 @@
     const tag = node.tagName.toLowerCase();
 
     if (!answer || type === "file") {
+      return;
+    }
+
+    if (type === "contenteditable") {
+      node.focus();
+      node.textContent = answer;
+      node.dispatchEvent(new Event("input", { bubbles: true }));
+      node.dispatchEvent(new Event("change", { bubbles: true }));
+      node.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+      await sleep(60);
       return;
     }
 
@@ -341,6 +450,11 @@
     }
 
     const payload = await payloadRes.json();
+    panel("JobMate: revealing cover letter fields…");
+    await revealCoverLetterTextFields();
+    await sleep(450);
+    await revealCoverLetterTextFields();
+    await sleep(300);
     const fieldItems = controls();
     panel(`JobMate: read ${fieldItems.length} form fields; asking LLM...`);
     const answerUrl = chromeApplySibling(payloadUrl, "answers");

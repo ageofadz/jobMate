@@ -1,6 +1,7 @@
 import * as cheerio from "cheerio";
 
 import { normalizeApplyUrl } from "@/lib/apply-url";
+import { listingHtmlHeaders } from "@/lib/listing-html-headers";
 import { extractCompensationRange, extractEmails, extractLinkedinLinks } from "@/lib/services/job-enrichment";
 import { inferCompanyNameFromListing, inferJobListingCoreFields } from "@/lib/services/llm";
 import type { ParsedJobPage } from "@/lib/types";
@@ -602,9 +603,8 @@ export async function parseJobHtml(
 
 export async function parseJobPage(sourceUrl: string, fallback: { title: string; company: string; location: string; snippet: string }) {
   const response = await fetch(sourceUrl, {
-    headers: {
-      "user-agent": "JobMateBot/0.1"
-    }
+    headers: listingHtmlHeaders,
+    signal: AbortSignal.timeout(90_000)
   });
 
   if (!response.ok) {
