@@ -1,3 +1,4 @@
+import { normalizeApplyUrl } from "@/lib/apply-url";
 import type { SearchCandidate } from "@/lib/types";
 
 type SerpApiOrganicResult = {
@@ -42,6 +43,20 @@ function inferCompanyFromTitle(title: string) {
   return "";
 }
 
+function normalizeLeverOrganicLink(link: string): string {
+  try {
+    const host = new URL(link).hostname.toLowerCase();
+
+    if (host.endsWith("lever.co")) {
+      return normalizeApplyUrl(link);
+    }
+  } catch {
+    return link;
+  }
+
+  return link;
+}
+
 function inferCompanyFromHost(host: string) {
   const normalized = host.replace(/^www\./i, "").toLowerCase();
   const first = normalized.split(".")[0] ?? "";
@@ -62,9 +77,11 @@ function organicSerpRowToCandidate(result: SerpApiOrganicResult): SearchCandidat
     return null;
   }
 
+  const canonicalLink = normalizeLeverOrganicLink(result.link);
+
   const host = (() => {
     try {
-      return new URL(result.link).hostname;
+      return new URL(canonicalLink).hostname;
     } catch {
       return result.displayed_link ?? "unknown";
     }
@@ -74,7 +91,7 @@ function organicSerpRowToCandidate(result: SerpApiOrganicResult): SearchCandidat
   const companyFromHost = inferCompanyFromHost(host);
 
   return {
-    sourceUrl: result.link,
+    sourceUrl: canonicalLink,
     sourceTitle: result.title ?? "Untitled listing",
     sourceHost: host,
     company: companyFromTitle || companyFromHost,
@@ -90,15 +107,17 @@ export function mergeOrganicResultsToCandidates(
   const deduped = new Map<string, SearchCandidate>();
 
   for (const result of organicRows) {
-    if (!result.link || deduped.has(result.link)) {
+    if (!result.link) {
       continue;
     }
 
     const cand = organicSerpRowToCandidate(result);
 
-    if (cand) {
-      deduped.set(result.link, cand);
+    if (!cand || deduped.has(cand.sourceUrl)) {
+      continue;
     }
+
+    deduped.set(cand.sourceUrl, cand);
   }
 
   return [...deduped.values()].slice(0, limit);
@@ -121,17 +140,17 @@ export function mergeOrganicResultsRoundRobin(
 
       const result = rows[round];
 
-      if (!result?.link || deduped.has(result.link)) {
+      if (!result?.link) {
         continue;
       }
 
       const cand = organicSerpRowToCandidate(result);
 
-      if (!cand) {
+      if (!cand || deduped.has(cand.sourceUrl)) {
         continue;
       }
 
-      deduped.set(result.link, cand);
+      deduped.set(cand.sourceUrl, cand);
       addedThisRound = true;
     }
 

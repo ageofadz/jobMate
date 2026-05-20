@@ -21,9 +21,16 @@ function locationParenGroup(locations: string[]) {
   return `(${inner})`;
 }
 
-function leverJobsSearchQuery(term: string, locations: string[]) {
-  const trimmed = term.trim();
-  const quotedTerm = `"${trimmed}"`;
+function quotedKeywordBlob(terms: string[]) {
+  return terms
+    .map((t) => t.trim())
+    .filter(Boolean)
+    .map((t) => `"${t}"`)
+    .join(" ");
+}
+
+function leverJobsCombinedSearchQuery(terms: string[], locations: string[]) {
+  const quoted = quotedKeywordBlob(terms);
   const trimLocs = locations.map((loc) => loc.trim()).filter(Boolean);
   const locPart =
     trimLocs.length === 1
@@ -32,7 +39,7 @@ function leverJobsSearchQuery(term: string, locations: string[]) {
         ? `(${trimLocs.map((loc) => `"${loc}"`).join(" OR ")})`
         : "";
 
-  return `site:jobs.lever.co ${quotedTerm} ${locPart} "/apply"`.replace(/\s+/g, " ").trim();
+  return `site:jobs.lever.co ${quoted} ${locPart} "/apply"`.replace(/\s+/g, " ").trim();
 }
 
 export function buildSearchQueries(input: PreferenceInput) {
@@ -42,30 +49,25 @@ export function buildSearchQueries(input: PreferenceInput) {
     (term) => term !== roleTitle
   );
   const queries: string[] = [];
+  const titleAndSeeds = [roleTitle, ...expansionTerms];
+  const quotedTerms = quotedKeywordBlob(titleAndSeeds);
 
   for (const domain of input.boardDomains) {
     const normalizedDomain = domain.trim().toLowerCase();
     const isLeverBoard =
       normalizedDomain === "lever.co" || normalizedDomain === "jobs.lever.co";
+
+    if (isLeverBoard) {
+      queries.push(leverJobsCombinedSearchQuery(titleAndSeeds, input.locations).trim());
+      continue;
+    }
+
     const boardBase =
-      isLeverBoard
-        ? leverJobsSearchQuery(roleTitle, input.locations)
-        : normalizedDomain === "boards.greenhouse.io"
-          ? `site:boards.greenhouse.io ${roleTitle} ${locationParen}`
-          : `site:${domain} ${roleTitle} ${locationParen}`;
+      normalizedDomain === "boards.greenhouse.io"
+        ? `site:boards.greenhouse.io ${quotedTerms} ${locationParen}`
+        : `site:${domain} ${quotedTerms} ${locationParen}`;
 
     queries.push(boardBase.trim());
-
-    for (const keyword of expansionTerms) {
-      const expanded =
-        isLeverBoard
-          ? leverJobsSearchQuery(keyword, input.locations)
-          : normalizedDomain === "boards.greenhouse.io"
-            ? `site:boards.greenhouse.io ${keyword} ${locationParen}`
-            : `site:${domain} ${keyword} ${locationParen}`;
-
-      queries.push(expanded.trim());
-    }
   }
 
   return uniq(queries).slice(0, 12);

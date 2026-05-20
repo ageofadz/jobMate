@@ -13,7 +13,13 @@ export function normalizeApplyUrl(href: string): string {
     const raw = url.pathname.replace(/\/+$/, "");
     const lower = raw.toLowerCase();
 
-    if (!lower.endsWith("/apply")) {
+    if (lower.endsWith("/apply")) {
+      return url.toString();
+    }
+
+    const segments = raw.split("/").filter(Boolean);
+
+    if (segments.length >= 2) {
       url.pathname = `${raw}/apply`;
     }
 
