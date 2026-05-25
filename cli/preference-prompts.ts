@@ -19,7 +19,9 @@ export async function promptPreferenceInput(_userId: string, defaults?: Partial<
 
   const boardDomainsRaw = await input({
     message: translate("boardDomainsPrompt"),
-    default: defaults?.boardDomains?.join(", ") ?? "boards.greenhouse.io, lever.co, jobteaser.com, workatastartup.com"
+    default:
+      defaults?.boardDomains?.join(", ") ??
+      "boards.greenhouse.io, lever.co, jobteaser.com, workatastartup.com, smartrecruiters.com"
   });
 
   const keywordSeedRaw = await input({

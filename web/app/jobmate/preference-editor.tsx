@@ -1,6 +1,12 @@
 import { useState } from "react";
 
+import {
+  boardDomainsFromOptionIds,
+  boardOptionIdsFromDomains,
+  DEFAULT_BOARD_DOMAINS
+} from "../../../lib/board-options";
 import { formatLocationsForInput, splitLocations } from "../../../lib/validators";
+import { BoardMultiSelect } from "./board-multiselect";
 import { enrichPreferenceInput, preferenceInputSchema } from "./browser-preference";
 import type { JobmateSqlite } from "./sqlite-client";
 
@@ -32,10 +38,10 @@ export function PreferenceEditorModal(props: {
   const [locationsRaw, setLocationsRaw] = useState(() =>
     initial?.locations ? formatLocationsForInput(JSON.parse(String(initial.locations))) : ""
   );
-  const [boardDomainsRaw, setBoardDomainsRaw] = useState(() =>
+  const [boardOptionIds, setBoardOptionIds] = useState(() =>
     initial?.board_domains
-      ? JSON.parse(String(initial.board_domains)).join(", ")
-      : "boards.greenhouse.io, lever.co, jobteaser.com, workatastartup.com"
+      ? boardOptionIdsFromDomains(JSON.parse(String(initial.board_domains)))
+      : boardOptionIdsFromDomains(DEFAULT_BOARD_DOMAINS)
   );
   const [keywordSeedRaw, setKeywordSeedRaw] = useState(() =>
     initial?.keyword_seed ? JSON.parse(String(initial.keyword_seed)).join(", ") : ""
@@ -57,7 +63,7 @@ export function PreferenceEditorModal(props: {
     const parsed = preferenceInputSchema.safeParse({
       title,
       locations: splitLocations(locationsRaw),
-      boardDomains: splitComma(boardDomainsRaw),
+      boardDomains: boardDomainsFromOptionIds(boardOptionIds),
       keywordSeed: keywordSeedRaw ? splitComma(keywordSeedRaw) : [],
       contextBlock,
       timezone,
@@ -173,9 +179,9 @@ export function PreferenceEditorModal(props: {
           </div>
           <div>
             <label className={lc()} htmlFor="pe-bd">
-              Board domains (comma-separated)
+              Job boards
             </label>
-            <input id="pe-bd" className={ic()} value={boardDomainsRaw} onChange={(ev) => setBoardDomainsRaw(ev.target.value)} />
+            <BoardMultiSelect id="pe-bd" selectedIds={boardOptionIds} onChange={setBoardOptionIds} />
           </div>
           <div>
             <label className={lc()} htmlFor="pe-kw">

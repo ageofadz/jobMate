@@ -90,7 +90,7 @@ export function JobmateApp() {
   const [statusBucket, setStatusBucket] = useState<"archived" | "applied">("archived");
   const [bucketJobs, setBucketJobs] = useState<BucketJobRow[]>([]);
 
-  const [applySession, setApplySession] = useState<{
+  const [applySessions, setApplySessions] = useState<Array<{
     jobId: string;
     company: string;
     sourceTitle: string;
@@ -100,7 +100,9 @@ export function JobmateApp() {
     attentionMessage: string;
     attentionInstruction: string;
     kind: string;
-  } | null>(null);
+  }>>([]);
+
+  const applySession = applySessions[0] ?? null;
 
   const [emailSyncBusy, setEmailSyncBusy] = useState(false);
 
@@ -133,26 +135,26 @@ export function JobmateApp() {
         return;
       }
       if (data.type === "JOBMATE_APPLY_STARTED") {
-        setApplySession((prev) =>
-          prev ? { ...prev, status: "Applying…" } : prev
-        );
+        setApplySessions(prev => prev.map(s =>
+          s.applyUrl === data.applyUrl ? { ...s, status: "Applying…" } : s
+        ));
         return;
       }
       if (data.type !== "JOBMATE_APPLY_ATTENTION") {
         return;
       }
-      setApplySession((prev) =>
-        prev
+      setApplySessions(prev => prev.map(s =>
+        s.applyUrl === data.applyUrl
           ? {
-              ...prev,
+              ...s,
               status: data.kind === "confirm" ? "Review ready" : "Needs attention",
               needsAttention: true,
               attentionMessage: data.message ?? "",
               attentionInstruction: data.instruction ?? "",
               kind: data.kind ?? "stuck"
             }
-          : prev
-      );
+          : s
+      ));
     }
     window.addEventListener("message", onExtensionMessage);
     return () => window.removeEventListener("message", onExtensionMessage);
@@ -574,7 +576,7 @@ export function JobmateApp() {
         return;
       }
 
-      if (applySession) {
+      if (applySessions.some(s => s.jobId === jobId)) {
         return;
       }
 
@@ -708,7 +710,7 @@ export function JobmateApp() {
       u.hash = `jobmatePayload=${encodeURIComponent(payloadUrl)}`;
       const applyTabUrl = u.toString();
 
-      setApplySession({
+      const newSession = {
         jobId,
         company: String(job.company),
         sourceTitle: String(job.source_title),
@@ -718,19 +720,21 @@ export function JobmateApp() {
         attentionMessage: "",
         attentionInstruction: "",
         kind: ""
-      });
+      };
+
+      setApplySessions(prev => [...prev, newSession]);
 
       try {
         await openBackgroundTabViaExtension(applyTabUrl, payloadUrl);
       } catch (err) {
         toast.error(err instanceof Error ? err.message : String(err));
-        setApplySession(null);
+        setApplySessions(prev => prev.filter(s => s.jobId !== jobId));
         return;
       }
 
-      setApplySession((prev) => (prev ? { ...prev, status: "Applying…" } : prev));
+      setApplySessions(prev => prev.map(s => s.jobId === jobId ? { ...s, status: "Applying…" } : s));
     },
-    [sqlite, userId, applySession]
+    [sqlite, userId, applySessions]
   );
 
   async function deleteJobRow(jobId: string) {
@@ -741,12 +745,12 @@ export function JobmateApp() {
     bumpData();
   }
 
-  async function doneApplying() {
-    if (!sqlite || !userId || !applySession) {
+  async function doneApplying(jobId: string, applyUrl: string) {
+    if (!sqlite || !userId) {
       return;
     }
-    await markAppliedRow(applySession.jobId, applySession.applyUrl);
-    setApplySession(null);
+    await markAppliedRow(jobId, applyUrl);
+    setApplySessions(prev => prev.filter(s => s.jobId !== jobId));
   }
 
   async function runEmailSync() {
@@ -993,13 +997,15 @@ export function JobmateApp() {
 
   return (
     <div className="flex min-h-screen bg-white text-gray-900 dark:bg-gray-950 dark:text-gray-100">
-      {applySession ? (
+      {applySessions.map((s, i) => (
         <ApplySessionBadge
-          session={applySession}
-          onDismiss={() => setApplySession(null)}
-          onDoneApplying={() => void doneApplying()}
+          key={s.jobId}
+          session={s}
+          index={i}
+          onDismiss={() => setApplySessions(prev => prev.filter(x => x.jobId !== s.jobId))}
+          onDoneApplying={() => void doneApplying(s.jobId, s.applyUrl)}
         />
-      ) : null}
+      ))}
       <aside className="flex w-52 shrink-0 flex-col border-r border-gray-200 dark:border-gray-800">
         <div className="border-b border-gray-200 px-4 py-5 dark:border-gray-800">
           <h1 className="text-lg font-semibold tracking-tight">JobMate</h1>
@@ -1102,14 +1108,16 @@ function ApplySessionBadge(props: {
     attentionInstruction: string;
     kind: string;
   };
+  index: number;
   onDismiss: () => void;
   onDoneApplying: () => void;
 }) {
-  const { session, onDismiss, onDoneApplying } = props;
+  const { session, index, onDismiss, onDoneApplying } = props;
   const isAttention = session.needsAttention;
+  const topOffset = 16 + index * 180;
 
   return (
-    <div className="fixed right-4 top-4 z-50 w-72 rounded-xl border shadow-lg bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-700 overflow-hidden">
+    <div className="fixed right-4 z-50 w-72 rounded-xl border shadow-lg bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-700 overflow-hidden" style={{ top: topOffset }}>
       <div className={`px-4 py-2 flex items-center justify-between ${isAttention ? "bg-amber-50 dark:bg-amber-950 border-b border-amber-200 dark:border-amber-800" : "bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700"}`}>
         <span className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
           {isAttention ? "⚠ Apply" : "▶ Apply"}
