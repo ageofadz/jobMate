@@ -7,6 +7,7 @@ export const SETTING_NOTIFICATION_WEBHOOK_URL = "notification_webhook_url";
 export const SETTING_INITIAL_SETUP_COMPLETE = "initial_setup_complete";
 export const SETTING_LANGUAGE = "language";
 export const SETTING_CHROME_EXTENSION_OUTPUT_DIR = "chrome_extension_output_dir";
+export const SETTING_APPLY_EMAIL = "apply_email";
 
 export function getSetting(key: string): string | null {
   const db = getSqlite();
@@ -28,7 +29,7 @@ export function getGeminiApiKey() {
 }
 
 export function getGeminiModel() {
-  return getSetting(SETTING_GEMINI_MODEL) || "gemini-3-flash-preview";
+  return getSetting(SETTING_GEMINI_MODEL) || "gemini-3.1-flash-lite";
 }
 
 export function getNotificationWebhookUrl() {
@@ -42,6 +43,11 @@ export function getLanguageSetting() {
 
 export function getChromeExtensionOutputDir() {
   const v = getSetting(SETTING_CHROME_EXTENSION_OUTPUT_DIR);
+  return v?.trim() ? v.trim() : undefined;
+}
+
+export function getApplyEmail() {
+  const v = getSetting(SETTING_APPLY_EMAIL);
   return v?.trim() ? v.trim() : undefined;
 }
 

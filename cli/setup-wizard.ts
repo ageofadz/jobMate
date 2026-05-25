@@ -46,7 +46,7 @@ export async function runInitialSetupWizardIfNeeded(userId: string) {
 
   const model = await input({
     message: translate("geminiModel"),
-    default: "gemini-3-flash-preview"
+    default: "gemini-3.1-flash-lite"
   });
 
   const webhook = await input({
@@ -106,7 +106,7 @@ export async function runInitialSetupWizardIfNeeded(userId: string) {
 
   setSetting(SETTING_SERPAPI_API_KEY, serp.trim());
   setSetting(SETTING_GEMINI_API_KEY, gemini.trim());
-  setSetting(SETTING_GEMINI_MODEL, model.trim() || "gemini-3-flash-preview");
+  setSetting(SETTING_GEMINI_MODEL, model.trim() || "gemini-3.1-flash-lite");
   setSetting(SETTING_NOTIFICATION_WEBHOOK_URL, webhook.trim());
   setSetting(SETTING_CHROME_EXTENSION_OUTPUT_DIR, chromeExtensionOutputDir);
   setSetting(SETTING_INITIAL_SETUP_COMPLETE, "1");

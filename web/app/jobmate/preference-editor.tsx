@@ -1,5 +1,6 @@
 import { useState } from "react";
 
+import { formatLocationsForInput, splitLocations } from "../../../lib/validators";
 import { enrichPreferenceInput, preferenceInputSchema } from "./browser-preference";
 import type { JobmateSqlite } from "./sqlite-client";
 
@@ -29,10 +30,12 @@ export function PreferenceEditorModal(props: {
   const { sqlite, userId, mode, initial, onClose, onSaved } = props;
   const [title, setTitle] = useState(() => String(initial?.title ?? ""));
   const [locationsRaw, setLocationsRaw] = useState(() =>
-    initial?.locations ? JSON.parse(String(initial.locations)).join(", ") : ""
+    initial?.locations ? formatLocationsForInput(JSON.parse(String(initial.locations))) : ""
   );
   const [boardDomainsRaw, setBoardDomainsRaw] = useState(() =>
-    initial?.board_domains ? JSON.parse(String(initial.board_domains)).join(", ") : "boards.greenhouse.io, lever.co"
+    initial?.board_domains
+      ? JSON.parse(String(initial.board_domains)).join(", ")
+      : "boards.greenhouse.io, lever.co, jobteaser.com, workatastartup.com"
   );
   const [keywordSeedRaw, setKeywordSeedRaw] = useState(() =>
     initial?.keyword_seed ? JSON.parse(String(initial.keyword_seed)).join(", ") : ""
@@ -53,7 +56,7 @@ export function PreferenceEditorModal(props: {
 
     const parsed = preferenceInputSchema.safeParse({
       title,
-      locations: splitComma(locationsRaw),
+      locations: splitLocations(locationsRaw),
       boardDomains: splitComma(boardDomainsRaw),
       keywordSeed: keywordSeedRaw ? splitComma(keywordSeedRaw) : [],
       contextBlock,
@@ -164,9 +167,9 @@ export function PreferenceEditorModal(props: {
           </div>
           <div>
             <label className={lc()} htmlFor="pe-loc">
-              Locations (comma-separated)
+              Locations (one per line, e.g. Chicago, IL, US)
             </label>
-            <input id="pe-loc" className={ic()} value={locationsRaw} onChange={(ev) => setLocationsRaw(ev.target.value)} />
+            <textarea id="pe-loc" rows={3} className={ic()} value={locationsRaw} onChange={(ev) => setLocationsRaw(ev.target.value)} />
           </div>
           <div>
             <label className={lc()} htmlFor="pe-bd">

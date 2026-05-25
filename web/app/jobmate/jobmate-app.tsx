@@ -4,8 +4,11 @@ import { toast } from "sonner";
 
 import { normalizeApplyUrl } from "@/lib/apply-url";
 
+import { openBackgroundTabViaExtension } from "./extension-open-tab";
 import { runBrowserIngestion } from "./browser-ingest";
+import { classifyJobEmailStatus } from "./gemini-field-answers";
 import {
+  SETTING_APPLY_EMAIL,
   SETTING_GEMINI_API_KEY,
   SETTING_GEMINI_MODEL,
   SETTING_INITIAL_SETUP_COMPLETE,
@@ -19,16 +22,17 @@ import type { JobmateSqlite } from "./sqlite-client";
 import { BrowserProfileWizard, BrowserSetupWizard } from "./startup-wizard";
 import { useJobmateSqlite } from "./sqlite-context";
 import { formatProfileBlock } from "./format-profile-block";
+import { ResultsPanel, type ResultJobRow } from "./results-panel";
 
 type PageId = "home" | "targets" | "results" | "statuses" | "metrics" | "config";
 
-const NAV: { id: PageId; label: string; key: string }[] = [
-  { id: "home", label: "Home", key: "1" },
-  { id: "targets", label: "Targets", key: "2" },
-  { id: "results", label: "Results", key: "3" },
-  { id: "statuses", label: "Statuses", key: "4" },
-  { id: "metrics", label: "Metrics", key: "5" },
-  { id: "config", label: "Config", key: "6" }
+const NAV: { id: PageId; label: string }[] = [
+  { id: "home", label: "Home" },
+  { id: "targets", label: "Targets" },
+  { id: "results", label: "Results" },
+  { id: "statuses", label: "Statuses" },
+  { id: "metrics", label: "Metrics" },
+  { id: "config", label: "Config" }
 ];
 
 function parseStoredJsonStrings(raw: string | null | undefined): string[] {
@@ -42,24 +46,6 @@ function parseStoredJsonStrings(raw: string | null | undefined): string[] {
     return [];
   }
 }
-
-type ResultJobRow = {
-  id: string;
-  preference_id: string;
-  company: string;
-  source_title: string;
-  status: string;
-  discovered_at: string;
-  apply_url: string;
-  source_url: string;
-  summary: string;
-  listing_text: string;
-  compensation_range: string | null;
-  location: string;
-  company_homepage: string | null;
-  linkedin_links: string | null;
-  hiring_contacts: string | null;
-};
 
 type BucketJobRow = {
   id: string;
@@ -81,6 +67,7 @@ type BucketJobRow = {
   applied_application_url: string | null;
   applied_at_linkedin_links: string | null;
   applied_at_hiring_contacts: string | null;
+  email_status: string | null;
 };
 
 export function JobmateApp() {
@@ -103,6 +90,20 @@ export function JobmateApp() {
   const [statusBucket, setStatusBucket] = useState<"archived" | "applied">("archived");
   const [bucketJobs, setBucketJobs] = useState<BucketJobRow[]>([]);
 
+  const [applySession, setApplySession] = useState<{
+    jobId: string;
+    company: string;
+    sourceTitle: string;
+    applyUrl: string;
+    status: string;
+    needsAttention: boolean;
+    attentionMessage: string;
+    attentionInstruction: string;
+    kind: string;
+  } | null>(null);
+
+  const [emailSyncBusy, setEmailSyncBusy] = useState(false);
+
   const [metricRows, setMetricRows] = useState<{ day: string; retrieved: number; applied: number }[]>([]);
 
   const [dataEpoch, setDataEpoch] = useState(0);
@@ -118,8 +119,106 @@ export function JobmateApp() {
     setDataEpoch((x) => x + 1);
   }, []);
 
+  useEffect(() => {
+    function onExtensionMessage(ev: MessageEvent) {
+      const data = ev.data as {
+        source?: string;
+        type?: string;
+        message?: string;
+        instruction?: string;
+        applyUrl?: string;
+        kind?: string;
+      };
+      if (!data || data.source !== "jobmate-extension") {
+        return;
+      }
+      if (data.type === "JOBMATE_APPLY_STARTED") {
+        setApplySession((prev) =>
+          prev ? { ...prev, status: "Applying…" } : prev
+        );
+        return;
+      }
+      if (data.type !== "JOBMATE_APPLY_ATTENTION") {
+        return;
+      }
+      setApplySession((prev) =>
+        prev
+          ? {
+              ...prev,
+              status: data.kind === "confirm" ? "Review ready" : "Needs attention",
+              needsAttention: true,
+              attentionMessage: data.message ?? "",
+              attentionInstruction: data.instruction ?? "",
+              kind: data.kind ?? "stuck"
+            }
+          : prev
+      );
+    }
+    window.addEventListener("message", onExtensionMessage);
+    return () => window.removeEventListener("message", onExtensionMessage);
+  }, []);
+
   const [setupGateResolved, setSetupGateResolved] = useState(false);
   const [setupComplete, setSetupComplete] = useState(false);
+
+  useEffect(() => {
+    const failRefresh = (action: string) => {
+      throw new Error(`JobMate blocked forbidden browser refresh/navigation attempt via ${action}.`);
+    };
+
+    const locationObject = window.location as Location & {
+      reload?: () => void;
+      assign?: (url: string | URL) => void;
+      replace?: (url: string | URL) => void;
+      __jobmateReloadBlocked?: boolean;
+    };
+
+    if (!locationObject.__jobmateReloadBlocked) {
+      try {
+        locationObject.reload = () => failRefresh("location.reload");
+      } catch {
+      }
+
+      try {
+        locationObject.assign = (_url: string | URL) => failRefresh("location.assign");
+      } catch {
+      }
+
+      try {
+        locationObject.replace = (_url: string | URL) => failRefresh("location.replace");
+      } catch {
+      }
+
+      locationObject.__jobmateReloadBlocked = true;
+    }
+
+    function onKeyDown(ev: KeyboardEvent) {
+      const key = ev.key.toLowerCase();
+      const isRefreshShortcut =
+        key === "f5" || ((ev.metaKey || ev.ctrlKey) && key === "r");
+
+      if (!isRefreshShortcut) {
+        return;
+      }
+
+      ev.preventDefault();
+      ev.stopPropagation();
+      toast.error("JobMate blocked browser refresh.");
+    }
+
+    function onBeforeUnload(ev: BeforeUnloadEvent) {
+      ev.preventDefault();
+      ev.returnValue = "";
+    }
+
+    window.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("beforeunload", onBeforeUnload);
+
+    return () => {
+      window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("beforeunload", onBeforeUnload);
+    };
+  }, []);
 
   useEffect(() => {
     if (!sqlite || !ready) {
@@ -196,10 +295,7 @@ export function JobmateApp() {
 
     try {
       if (page === "home" || page === "config") {
-        const [u] = await sqlite.all<Record<string, unknown>>(
-          "SELECT id, email, full_name, location, linkedin_url, phone, created_at, resume_asset_id FROM users WHERE id = ?",
-          [userId]
-        );
+        const [u] = await sqlite.all<Record<string, unknown>>("SELECT * FROM users WHERE id = ?", [userId]);
         const [{ c }] = await sqlite.all<{ c: number }>(
           "SELECT COUNT(*) as c FROM preferences WHERE user_id = ?",
           [userId]
@@ -224,7 +320,7 @@ export function JobmateApp() {
         );
         setPrefs(prow);
         const jrows = await sqlite.all<ResultJobRow>(
-          `SELECT id, preference_id, company, source_title, status, discovered_at, apply_url,
+          `SELECT id, preference_id, company, source_title, status, discovered_at, posted_at, company_logo_url, apply_url,
             source_url, summary, listing_text, compensation_range, location, company_homepage,
             linkedin_links, hiring_contacts
            FROM jobs WHERE user_id = ? AND status IN ('new', 'reviewed') ORDER BY datetime(discovered_at) DESC`,
@@ -240,7 +336,7 @@ export function JobmateApp() {
         const jrows = await sqlite.all<BucketJobRow>(
           `SELECT id, company, source_title, status, discovered_at, applied_at, archived_at, apply_url,
             source_url, summary, listing_text, compensation_range, location, company_homepage,
-            linkedin_links, hiring_contacts, applied_application_url, applied_at_linkedin_links, applied_at_hiring_contacts
+            linkedin_links, hiring_contacts, applied_application_url, applied_at_linkedin_links, applied_at_hiring_contacts, email_status
            FROM jobs WHERE user_id = ? AND status IN (${placeholders}) ORDER BY datetime(COALESCE(applied_at, archived_at, discovered_at)) DESC`,
           [userId, ...statuses]
         );
@@ -275,28 +371,6 @@ export function JobmateApp() {
   useEffect(() => {
     void loadPage();
   }, [loadPage]);
-
-  useEffect(() => {
-    if (!setupComplete || userId === null) {
-      return;
-    }
-
-    function onKey(ev: KeyboardEvent) {
-      if (ev.ctrlKey || ev.metaKey || ev.altKey) {
-        return;
-      }
-
-      const m = NAV.find((n) => n.key === ev.key);
-
-      if (m) {
-        ev.preventDefault();
-        setPage(m.id);
-      }
-    }
-
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [setupComplete, userId]);
 
   const openJobsCount = useMemo(() => {
     let n = 0;
@@ -342,7 +416,7 @@ export function JobmateApp() {
         userId,
         serpApiKey: serpRows[0]?.value ?? "",
         geminiApiKey: gemRows[0]?.value?.trim() ? gemRows[0].value : null,
-        geminiModel: modRows[0]?.value?.trim() || "gemini-3-flash-preview",
+        geminiModel: modRows[0]?.value?.trim() || "gemini-3.1-flash-lite",
         webhookUrl: hookRows[0]?.value?.trim() ?? "",
         perTargetLimit: 100,
         onProgress: (ev) => {
@@ -500,6 +574,10 @@ export function JobmateApp() {
         return;
       }
 
+      if (applySession) {
+        return;
+      }
+
       const gemRows = await sqlite.all<{ value: string }>("SELECT value FROM kv_settings WHERE key = ?", [
         SETTING_GEMINI_API_KEY
       ]);
@@ -507,7 +585,7 @@ export function JobmateApp() {
         SETTING_GEMINI_MODEL
       ]);
       const geminiApiKey = gemRows[0]?.value?.trim() ?? "";
-      const geminiModel = modRows[0]?.value?.trim() || "gemini-3-flash-preview";
+      const geminiModel = modRows[0]?.value?.trim() || "gemini-3.1-flash-lite";
 
       if (!geminiApiKey) {
         window.alert("Add a Gemini API key in Config to use Chrome fill.");
@@ -596,6 +674,8 @@ export function JobmateApp() {
         writingSample: String(profileRow?.essay ?? ""),
         coverLetterTemplate: String(profileRow?.cover_letter_template ?? ""),
         coverLetterText: "",
+        candidateEmail: String(profileRow?.email ?? "").trim(),
+        candidateFullName: String(profileRow?.full_name ?? "").trim(),
         resumeUpload,
         coverUpload: null,
         linkedinLinks: Array.isArray(linkedinLinks) ? linkedinLinks.map(String) : [],
@@ -626,9 +706,31 @@ export function JobmateApp() {
 
       const u = new URL(applyUrlNormalized);
       u.hash = `jobmatePayload=${encodeURIComponent(payloadUrl)}`;
-      window.open(u.toString(), "_blank", "noopener,noreferrer");
+      const applyTabUrl = u.toString();
+
+      setApplySession({
+        jobId,
+        company: String(job.company),
+        sourceTitle: String(job.source_title),
+        applyUrl: applyUrlNormalized,
+        status: "Opening apply tab…",
+        needsAttention: false,
+        attentionMessage: "",
+        attentionInstruction: "",
+        kind: ""
+      });
+
+      try {
+        await openBackgroundTabViaExtension(applyTabUrl, payloadUrl);
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : String(err));
+        setApplySession(null);
+        return;
+      }
+
+      setApplySession((prev) => (prev ? { ...prev, status: "Applying…" } : prev));
     },
-    [sqlite, userId]
+    [sqlite, userId, applySession]
   );
 
   async function deleteJobRow(jobId: string) {
@@ -637,6 +739,165 @@ export function JobmateApp() {
     }
     await sqlite.run(`DELETE FROM jobs WHERE id = ? AND user_id = ?`, [jobId, userId]);
     bumpData();
+  }
+
+  async function doneApplying() {
+    if (!sqlite || !userId || !applySession) {
+      return;
+    }
+    await markAppliedRow(applySession.jobId, applySession.applyUrl);
+    setApplySession(null);
+  }
+
+  async function runEmailSync() {
+    if (!sqlite || !userId) {
+      return;
+    }
+
+    const gemRows = await sqlite.all<{ value: string }>("SELECT value FROM kv_settings WHERE key = ?", [SETTING_GEMINI_API_KEY]);
+    const modRows = await sqlite.all<{ value: string }>("SELECT value FROM kv_settings WHERE key = ?", [SETTING_GEMINI_MODEL]);
+    const geminiApiKey = gemRows[0]?.value?.trim() ?? "";
+    const geminiModel = modRows[0]?.value?.trim() || "gemini-3.1-flash-lite";
+
+    const profileRows = await sqlite.all<{ email: string | null }>("SELECT email FROM users WHERE id = ?", [userId]);
+    const applyEmail = profileRows[0]?.email?.trim() ?? "";
+
+    if (!applyEmail) {
+      toast.error("No email configured in your profile.");
+      return;
+    }
+
+    const domain = applyEmail.split("@")[1]?.toLowerCase() ?? "";
+    let webmailUrl = "";
+
+    if (domain === "gmail.com" || domain === "googlemail.com") {
+      webmailUrl = "https://mail.google.com/mail/u/0/#inbox";
+    } else if (["outlook.com", "hotmail.com", "live.com", "msn.com"].includes(domain)) {
+      webmailUrl = "https://outlook.live.com/mail/0/inbox";
+    } else if (domain === "yahoo.com" || domain === "ymail.com") {
+      webmailUrl = "https://mail.yahoo.com/";
+    } else if (domain === "proton.me" || domain === "protonmail.com") {
+      webmailUrl = "https://mail.proton.me/u/0/inbox";
+    } else {
+      webmailUrl = `https://mail.google.com/mail/u/0/#inbox`;
+    }
+
+    setEmailSyncBusy(true);
+    toast.info("Opening email inbox…");
+
+    try {
+      const requestId = crypto.randomUUID();
+      const text = await new Promise<string>((resolve, reject) => {
+        const timer = window.setTimeout(() => {
+          window.removeEventListener("message", onReply);
+          reject(new Error("Email sync timed out."));
+        }, 60_000);
+
+        function onReply(ev: MessageEvent) {
+          const d = ev.data as { source?: string; requestId?: string; ok?: boolean; text?: string; error?: string | null };
+          if (!d || d.source !== "jobmate-extension" || d.requestId !== requestId) return;
+          window.removeEventListener("message", onReply);
+          window.clearTimeout(timer);
+          if (!d.ok) { reject(new Error(d.error || "Email sync failed.")); return; }
+          resolve(d.text ?? "");
+        }
+
+        window.addEventListener("message", onReply);
+        window.postMessage({ source: "jobmate-web", type: "JOBMATE_EMAIL_SYNC", requestId, url: webmailUrl }, "*");
+      });
+
+      const appliedJobs = await sqlite.all<{ id: string; company: string; source_title: string; applied_at: string }>(
+        `SELECT id, company, source_title, applied_at FROM jobs WHERE user_id = ? AND status = 'applied' AND applied_at IS NOT NULL`,
+        [userId]
+      );
+
+      if (!appliedJobs.length) {
+        toast.info("No applied jobs to check.");
+        return;
+      }
+
+      toast.info("Classifying emails…");
+
+      const updates = await classifyJobEmailStatus({
+        geminiApiKey,
+        geminiModel,
+        jobs: appliedJobs.map((j) => ({
+          id: j.id,
+          company: j.company,
+          sourceTitle: j.source_title,
+          appliedAt: j.applied_at
+        })),
+        inboxText: text
+      });
+
+      const now = new Date().toISOString();
+      let updatedCount = 0;
+
+      for (const u of updates) {
+        if (u.emailStatus !== null) {
+          await sqlite.run(`UPDATE jobs SET email_status = ?, updated_at = ? WHERE id = ? AND user_id = ?`, [
+            u.emailStatus,
+            now,
+            u.jobId,
+            userId
+          ]);
+          updatedCount++;
+        }
+      }
+
+      bumpData();
+      toast.success(`Email sync complete. ${updatedCount} job${updatedCount !== 1 ? "s" : ""} updated.`);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      setEmailSyncBusy(false);
+    }
+  }
+
+  async function fetchJobContacts(job: ResultJobRow) {
+    if (!sqlite || userId === null) {
+      throw new Error("Database not ready.");
+    }
+
+    const serpRows = await sqlite.all<{ value: string }>("SELECT value FROM kv_settings WHERE key = ?", [
+      SETTING_SERPAPI_API_KEY
+    ]);
+    const serpApiKey = serpRows[0]?.value?.trim() ?? "";
+
+    const res = await fetch("/api/job-contacts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        serpApiKey,
+        company: job.company,
+        listingText: job.listing_text,
+        sourceUrl: job.source_url,
+        parsedHomepage: job.company_homepage
+      })
+    });
+
+    const data = (await res.json()) as {
+      error?: string;
+      linkedinLinks?: string[];
+      hiringContacts?: string[];
+      companyHomepage?: string | null;
+    };
+
+    if (!res.ok) {
+      throw new Error(data.error ?? `Contacts fetch failed (${res.status})`);
+    }
+
+    const linkedinLinks = Array.isArray(data.linkedinLinks) ? data.linkedinLinks.map(String) : [];
+    const hiringContacts = Array.isArray(data.hiringContacts) ? data.hiringContacts.map(String) : [];
+    const now = new Date().toISOString();
+
+    await sqlite.run(
+      `UPDATE jobs SET linkedin_links = ?, hiring_contacts = ?, company_homepage = COALESCE(?, company_homepage), updated_at = ? WHERE id = ? AND user_id = ?`,
+      [JSON.stringify(linkedinLinks), JSON.stringify(hiringContacts), data.companyHomepage ?? null, now, job.id, userId]
+    );
+    bumpData();
+
+    return { linkedinLinks, hiringContacts };
   }
 
   const filteredResults = useMemo(() => {
@@ -732,6 +993,13 @@ export function JobmateApp() {
 
   return (
     <div className="flex min-h-screen bg-white text-gray-900 dark:bg-gray-950 dark:text-gray-100">
+      {applySession ? (
+        <ApplySessionBadge
+          session={applySession}
+          onDismiss={() => setApplySession(null)}
+          onDoneApplying={() => void doneApplying()}
+        />
+      ) : null}
       <aside className="flex w-52 shrink-0 flex-col border-r border-gray-200 dark:border-gray-800">
         <div className="border-b border-gray-200 px-4 py-5 dark:border-gray-800">
           <h1 className="text-lg font-semibold tracking-tight">JobMate</h1>
@@ -747,13 +1015,12 @@ export function JobmateApp() {
                 : "text-gray-700 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-900/60"
                 }`}
             >
-              <span className="mr-2 font-mono text-xs text-gray-400 dark:text-gray-500">{item.key}</span>
               {item.label}
             </button>
           ))}
         </nav>
       </aside>
-      <main className="flex-1 overflow-auto px-8 py-10">
+      <main className={`flex-1 overflow-auto px-8 py-10 ${page === "results" ? "min-w-0" : ""}`}>
         {fetchError ? (
           <p className="text-sm text-red-600 dark:text-red-400">{fetchError}</p>
         ) : busy ? (
@@ -792,6 +1059,7 @@ export function JobmateApp() {
             onArchive={archiveJobRow}
             onMarkApplied={markAppliedRow}
             onChromeApply={openChromeApplyForJob}
+            onFetchContacts={fetchJobContacts}
           />
         ) : page === "statuses" ? (
           <StatusesPanel
@@ -800,11 +1068,13 @@ export function JobmateApp() {
             jobs={bucketJobs}
             onRestore={statusBucket === "archived" ? unarchiveRow : unapplyRow}
             onDelete={deleteJobRow}
+            emailSyncBusy={emailSyncBusy}
+            onEmailSync={() => void runEmailSync()}
           />
         ) : page === "metrics" ? (
           <MetricsPanel rows={metricRows} />
         ) : (
-          <ConfigPanel sqlite={sqlite} userId={userId} profile={profile} bumpData={bumpData} />
+          <ConfigPanel sqlite={sqlite} userId={userId} profile={profile} bumpData={bumpData} dataEpoch={dataEpoch} />
         )}
       </main>
       {prefModal && sqlite && userId ? (
@@ -817,6 +1087,64 @@ export function JobmateApp() {
           onClose={() => setPrefModal(null)}
           onSaved={bumpData}
         />
+      ) : null}
+    </div>
+  );
+}
+
+function ApplySessionBadge(props: {
+  session: {
+    company: string;
+    sourceTitle: string;
+    status: string;
+    needsAttention: boolean;
+    attentionMessage: string;
+    attentionInstruction: string;
+    kind: string;
+  };
+  onDismiss: () => void;
+  onDoneApplying: () => void;
+}) {
+  const { session, onDismiss, onDoneApplying } = props;
+  const isAttention = session.needsAttention;
+
+  return (
+    <div className="fixed right-4 top-4 z-50 w-72 rounded-xl border shadow-lg bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-700 overflow-hidden">
+      <div className={`px-4 py-2 flex items-center justify-between ${isAttention ? "bg-amber-50 dark:bg-amber-950 border-b border-amber-200 dark:border-amber-800" : "bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700"}`}>
+        <span className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+          {isAttention ? "⚠ Apply" : "▶ Apply"}
+        </span>
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="text-xs text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+        >
+          ✕
+        </button>
+      </div>
+      <div className="px-4 py-3 space-y-1">
+        <p className="text-sm font-medium text-gray-900 dark:text-gray-100 truncate">{session.company}</p>
+        <p className="text-xs text-gray-500 dark:text-gray-400 truncate">{session.sourceTitle}</p>
+        <p className={`text-xs mt-1 ${isAttention ? "text-amber-700 dark:text-amber-400 font-medium" : "text-gray-500 dark:text-gray-400"}`}>
+          {session.status}
+        </p>
+        {isAttention && session.attentionMessage ? (
+          <p className="text-xs text-gray-600 dark:text-gray-300 mt-1">{session.attentionMessage}</p>
+        ) : null}
+        {isAttention && session.attentionInstruction ? (
+          <p className="text-xs text-gray-500 dark:text-gray-400 italic">{session.attentionInstruction}</p>
+        ) : null}
+      </div>
+      {isAttention ? (
+        <div className="px-4 pb-3">
+          <button
+            type="button"
+            onClick={onDoneApplying}
+            className="w-full rounded-lg bg-emerald-600 px-3 py-2 text-sm font-medium text-white hover:bg-emerald-700"
+          >
+            Done applying
+          </button>
+        </div>
       ) : null}
     </div>
   );
@@ -1145,110 +1473,13 @@ function CliJobDetailSections(props: {
   );
 }
 
-function ResultsPanel(props: {
-  prefs: { id: string; title: string }[];
-  jobs: ResultJobRow[];
-  filter: string | "all";
-  onFilter: (v: string | "all") => void;
-  onArchive: (jobId: string) => void;
-  onMarkApplied: (jobId: string, applyUrl: string) => void;
-  onChromeApply: (jobId: string) => void | Promise<void>;
-}) {
-  const { prefs, jobs, filter, onFilter, onArchive, onMarkApplied, onChromeApply } = props;
 
-  const prefTitle = (id: string) => prefs.find((p) => p.id === id)?.title ?? id;
-
-  return (
-    <div className="max-w-4xl space-y-6">
-      <div>
-        <h2 className="text-xl font-semibold tracking-tight">Results</h2>
-        <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">Jobs in new or reviewed status.</p>
-      </div>
-      <div className="flex flex-wrap gap-2">
-        <button
-          type="button"
-          onClick={() => onFilter("all")}
-          className={`rounded-full px-3 py-1 text-sm ${filter === "all"
-            ? "bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900"
-            : "border border-gray-300 dark:border-gray-700"
-            }`}
-        >
-          All
-        </button>
-        {prefs.map((p) => (
-          <button
-            key={p.id}
-            type="button"
-            onClick={() => onFilter(p.id)}
-            className={`rounded-full px-3 py-1 text-sm ${filter === p.id
-              ? "bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900"
-              : "border border-gray-300 dark:border-gray-700"
-              }`}
-          >
-            {p.title}
-          </button>
-        ))}
-      </div>
-      <ul className="divide-y divide-gray-200 rounded-xl border border-gray-200 dark:divide-gray-800 dark:border-gray-800">
-        {jobs.length === 0 ? (
-          <li className="px-4 py-8 text-center text-sm text-gray-500 dark:text-gray-400">No result jobs.</li>
-        ) : (
-          jobs.map((j) => {
-            const applyNorm = normalizeApplyUrl(j.apply_url);
-            const linkedins = parseStoredJsonStrings(j.linkedin_links);
-            const contacts = parseStoredJsonStrings(j.hiring_contacts);
-            return (
-              <li key={j.id} className="space-y-2 px-4 py-3">
-                <div className="flex flex-wrap items-baseline justify-between gap-2">
-                  <p className="font-medium">{j.company}</p>
-                  <span className="text-xs text-gray-500 dark:text-gray-400">{j.status}</span>
-                </div>
-                <p className="text-sm text-gray-700 dark:text-gray-300">{j.source_title}</p>
-                <p className="text-xs text-gray-500 dark:text-gray-400">
-                  {prefTitle(j.preference_id)} · {j.discovered_at}
-                </p>
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={() => void onChromeApply(j.id)}
-                    className="text-sm text-blue-700 underline dark:text-blue-400"
-                  >
-                    Apply
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void onMarkApplied(j.id, applyNorm)}
-                    className="text-sm text-green-700 underline dark:text-green-300"
-                  >
-                    Mark applied
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void onArchive(j.id)}
-                    className="text-sm text-gray-700 underline dark:text-gray-300"
-                  >
-                    Archive
-                  </button>
-                </div>
-                <CliJobDetailSections
-                  panel="results"
-                  summary={j.summary}
-                  compensationRange={j.compensation_range}
-                  location={j.location}
-                  companyHomepage={j.company_homepage}
-                  sourceUrl={j.source_url}
-                  listingText={j.listing_text}
-                  discoveredAt={j.discovered_at}
-                  linkedinLinks={linkedins}
-                  hiringContacts={contacts}
-                />
-              </li>
-            );
-          })
-        )}
-      </ul>
-    </div>
-  );
+function emailStatusLabel(s: string | null): { label: string; color: string } | null {
+  if (!s) return null;
+  if (s === "rejected") return { label: "Rejected", color: "text-red-600 dark:text-red-400" };
+  if (s === "waiting") return { label: "Waiting for response", color: "text-blue-600 dark:text-blue-400" };
+  if (s === "needs_action") return { label: "Needs attention", color: "text-amber-600 dark:text-amber-400" };
+  return null;
 }
 
 function StatusesPanel(props: {
@@ -1257,14 +1488,28 @@ function StatusesPanel(props: {
   jobs: BucketJobRow[];
   onRestore: (jobId: string) => void;
   onDelete: (jobId: string) => void;
+  emailSyncBusy: boolean;
+  onEmailSync: () => void;
 }) {
-  const { bucket, onBucket, jobs, onRestore, onDelete } = props;
+  const { bucket, onBucket, jobs, onRestore, onDelete, emailSyncBusy, onEmailSync } = props;
 
   return (
     <div className="max-w-4xl space-y-6">
-      <div>
-        <h2 className="text-xl font-semibold tracking-tight">Statuses</h2>
-        <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">Archived and dismissed, or applied jobs.</p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-xl font-semibold tracking-tight">Statuses</h2>
+          <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">Archived and dismissed, or applied jobs.</p>
+        </div>
+        {bucket === "applied" ? (
+          <button
+            type="button"
+            onClick={onEmailSync}
+            disabled={emailSyncBusy}
+            className="shrink-0 rounded-lg border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-800"
+          >
+            {emailSyncBusy ? "Syncing…" : "Email sync"}
+          </button>
+        ) : null}
       </div>
       <div className="flex gap-2">
         <button
@@ -1299,11 +1544,18 @@ function StatusesPanel(props: {
             const snapCt = parseStoredJsonStrings(j.applied_at_hiring_contacts);
             const applicationUrl = String(j.applied_application_url ?? "").trim() || j.apply_url;
 
+            const emailBadge = emailStatusLabel(j.email_status);
+
             return (
               <li key={j.id} className="space-y-2 px-4 py-3">
                 <div className="flex flex-wrap items-baseline justify-between gap-2">
                   <p className="font-medium">{j.company}</p>
-                  <span className="text-xs text-gray-500 dark:text-gray-400">{j.status}</span>
+                  <div className="flex items-center gap-2">
+                    {emailBadge ? (
+                      <span className={`text-xs font-medium ${emailBadge.color}`}>{emailBadge.label}</span>
+                    ) : null}
+                    <span className="text-xs text-gray-500 dark:text-gray-400">{j.status}</span>
+                  </div>
                 </div>
                 <p className="text-sm text-gray-700 dark:text-gray-300">{j.source_title}</p>
                 <p className="text-xs text-gray-500 dark:text-gray-400">
@@ -1391,18 +1643,35 @@ function MetricsPanel(props: { rows: { day: string; retrieved: number; applied: 
   );
 }
 
+function configFieldStatus(value: string, options?: { secret?: boolean; multiline?: boolean }) {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "Not set";
+  }
+  if (options?.secret) {
+    return `Configured (${trimmed.length} characters)`;
+  }
+  if (options?.multiline) {
+    const oneLine = trimmed.replace(/\s+/g, " ");
+    return oneLine.length > 72 ? `${oneLine.slice(0, 72)}…` : oneLine;
+  }
+  return trimmed.length > 72 ? `${trimmed.slice(0, 72)}…` : trimmed;
+}
+
 function ConfigPanel(props: {
   sqlite: JobmateSqlite | null;
   userId: string | null;
   profile: Record<string, unknown> | null;
   bumpData: () => void;
+  dataEpoch: number;
 }) {
-  const { sqlite, userId, profile, bumpData } = props;
+  const { sqlite, userId, profile, bumpData, dataEpoch } = props;
   const [language, setLanguage] = useState<"en" | "fr">("en");
   const [serpApiKey, setSerpApiKey] = useState("");
   const [geminiApiKey, setGeminiApiKey] = useState("");
-  const [geminiModel, setGeminiModel] = useState("gemini-3-flash-preview");
+  const [geminiModel, setGeminiModel] = useState("gemini-3.1-flash-lite");
   const [webhook, setWebhook] = useState("");
+  const [applyEmail, setApplyEmail] = useState("");
   const [fullName, setFullName] = useState("");
   const [email, setEmail] = useState("");
   const [website, setWebsite] = useState("");
@@ -1414,6 +1683,23 @@ function ConfigPanel(props: {
   const [workHistory, setWorkHistory] = useState("");
   const [skills, setSkills] = useState("");
   const [essay, setEssay] = useState("");
+  const [savedLanguage, setSavedLanguage] = useState<"en" | "fr">("en");
+  const [savedSerpApiKey, setSavedSerpApiKey] = useState("");
+  const [savedGeminiApiKey, setSavedGeminiApiKey] = useState("");
+  const [savedGeminiModel, setSavedGeminiModel] = useState("gemini-3.1-flash-lite");
+  const [savedWebhook, setSavedWebhook] = useState("");
+  const [savedApplyEmail, setSavedApplyEmail] = useState("");
+  const [savedFullName, setSavedFullName] = useState("");
+  const [savedEmail, setSavedEmail] = useState("");
+  const [savedWebsite, setSavedWebsite] = useState("");
+  const [savedCurrentLocation, setSavedCurrentLocation] = useState("");
+  const [savedPhone, setSavedPhone] = useState("");
+  const [savedLinkedinUrl, setSavedLinkedinUrl] = useState("");
+  const [savedPreferredCompRange, setSavedPreferredCompRange] = useState("");
+  const [savedCoverLetterTemplate, setSavedCoverLetterTemplate] = useState("");
+  const [savedWorkHistory, setSavedWorkHistory] = useState("");
+  const [savedSkills, setSavedSkills] = useState("");
+  const [savedEssay, setSavedEssay] = useState("");
   const [cfgMsg, setCfgMsg] = useState<string | null>(null);
   const [cfgBusy, setCfgBusy] = useState(false);
   const [resumeLabel, setResumeLabel] = useState<string | null>(null);
@@ -1442,43 +1728,79 @@ function ConfigPanel(props: {
       const hook = await sqlite.all<{ value: string }>("SELECT value FROM kv_settings WHERE key = ?", [
         SETTING_NOTIFICATION_WEBHOOK_URL
       ]);
+      const apply = await sqlite.all<{ value: string }>("SELECT value FROM kv_settings WHERE key = ?", [
+        SETTING_APPLY_EMAIL
+      ]);
 
       if (cancelled) {
         return;
       }
 
-      const lv = langRows[0]?.value;
-      if (lv === "en" || lv === "fr") {
-        setLanguage(lv);
-      }
+      const nextLanguage = langRows[0]?.value === "fr" ? "fr" : "en";
+      const nextSerp = serp[0]?.value ?? "";
+      const nextGem = gem[0]?.value ?? "";
+      const nextModel = mod[0]?.value?.trim() ? String(mod[0].value) : "gemini-3.1-flash-lite";
+      const nextWebhook = hook[0]?.value ?? "";
+      const nextApplyEmail = apply[0]?.value ?? "";
 
-      setSerpApiKey(serp[0]?.value ?? "");
-      setGeminiApiKey(gem[0]?.value ?? "");
-      setGeminiModel(mod[0]?.value?.trim() ? String(mod[0].value) : "gemini-3-flash-preview");
-      setWebhook(hook[0]?.value ?? "");
+      setLanguage(nextLanguage);
+      setSerpApiKey(nextSerp);
+      setGeminiApiKey(nextGem);
+      setGeminiModel(nextModel);
+      setWebhook(nextWebhook);
+      setApplyEmail(nextApplyEmail);
+      setSavedLanguage(nextLanguage);
+      setSavedSerpApiKey(nextSerp);
+      setSavedGeminiApiKey(nextGem);
+      setSavedGeminiModel(nextModel);
+      setSavedWebhook(nextWebhook);
+      setSavedApplyEmail(nextApplyEmail);
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [sqlite, userId]);
+  }, [sqlite, userId, dataEpoch]);
 
   useEffect(() => {
     if (!profile) {
       return;
     }
 
-    setFullName(String(profile.full_name ?? ""));
-    setEmail(String(profile.email ?? ""));
-    setWebsite(String(profile.website ?? ""));
-    setCurrentLocation(String(profile.current_location ?? profile.location ?? ""));
-    setPhone(String(profile.phone ?? ""));
-    setLinkedinUrl(String(profile.linkedin_url ?? ""));
-    setPreferredCompRange(String(profile.preferred_comp_range ?? ""));
-    setCoverLetterTemplate(String(profile.cover_letter_template ?? ""));
-    setWorkHistory(String(profile.work_history ?? ""));
-    setSkills(String(profile.skills ?? ""));
-    setEssay(String(profile.essay ?? ""));
+    const nextFullName = String(profile.full_name ?? "");
+    const nextEmail = String(profile.email ?? "");
+    const nextWebsite = String(profile.website ?? "");
+    const nextCurrentLocation = String(profile.current_location ?? profile.location ?? "");
+    const nextPhone = String(profile.phone ?? "");
+    const nextLinkedinUrl = String(profile.linkedin_url ?? "");
+    const nextPreferredCompRange = String(profile.preferred_comp_range ?? "");
+    const nextCoverLetterTemplate = String(profile.cover_letter_template ?? "");
+    const nextWorkHistory = String(profile.work_history ?? "");
+    const nextSkills = String(profile.skills ?? "");
+    const nextEssay = String(profile.essay ?? "");
+
+    setFullName(nextFullName);
+    setEmail(nextEmail);
+    setWebsite(nextWebsite);
+    setCurrentLocation(nextCurrentLocation);
+    setPhone(nextPhone);
+    setLinkedinUrl(nextLinkedinUrl);
+    setPreferredCompRange(nextPreferredCompRange);
+    setCoverLetterTemplate(nextCoverLetterTemplate);
+    setWorkHistory(nextWorkHistory);
+    setSkills(nextSkills);
+    setEssay(nextEssay);
+    setSavedFullName(nextFullName);
+    setSavedEmail(nextEmail);
+    setSavedWebsite(nextWebsite);
+    setSavedCurrentLocation(nextCurrentLocation);
+    setSavedPhone(nextPhone);
+    setSavedLinkedinUrl(nextLinkedinUrl);
+    setSavedPreferredCompRange(nextPreferredCompRange);
+    setSavedCoverLetterTemplate(nextCoverLetterTemplate);
+    setSavedWorkHistory(nextWorkHistory);
+    setSavedSkills(nextSkills);
+    setSavedEssay(nextEssay);
   }, [profile]);
 
   useEffect(() => {
@@ -1512,23 +1834,29 @@ function ConfigPanel(props: {
     setCfgMsg(null);
 
     try {
-      await sqlite.run(`INSERT OR REPLACE INTO kv_settings (key, value) VALUES (?, ?)`, [SETTING_LANGUAGE, language]);
-      await sqlite.run(`INSERT OR REPLACE INTO kv_settings (key, value) VALUES (?, ?)`, [
-        SETTING_SERPAPI_API_KEY,
-        serpApiKey.trim()
-      ]);
-      await sqlite.run(`INSERT OR REPLACE INTO kv_settings (key, value) VALUES (?, ?)`, [
-        SETTING_GEMINI_API_KEY,
-        geminiApiKey.trim()
-      ]);
-      await sqlite.run(`INSERT OR REPLACE INTO kv_settings (key, value) VALUES (?, ?)`, [
-        SETTING_GEMINI_MODEL,
-        geminiModel.trim() || "gemini-3-flash-preview"
-      ]);
+      const nextLanguage = language;
+      const nextSerp = serpApiKey.trim();
+      const nextGem = geminiApiKey.trim();
+      const nextModel = geminiModel.trim() || "gemini-3.1-flash-lite";
+      const nextWebhook = webhook.trim();
+      const nextApplyEmail = applyEmail.trim();
+
+      await sqlite.run(`INSERT OR REPLACE INTO kv_settings (key, value) VALUES (?, ?)`, [SETTING_LANGUAGE, nextLanguage]);
+      await sqlite.run(`INSERT OR REPLACE INTO kv_settings (key, value) VALUES (?, ?)`, [SETTING_SERPAPI_API_KEY, nextSerp]);
+      await sqlite.run(`INSERT OR REPLACE INTO kv_settings (key, value) VALUES (?, ?)`, [SETTING_GEMINI_API_KEY, nextGem]);
+      await sqlite.run(`INSERT OR REPLACE INTO kv_settings (key, value) VALUES (?, ?)`, [SETTING_GEMINI_MODEL, nextModel]);
       await sqlite.run(`INSERT OR REPLACE INTO kv_settings (key, value) VALUES (?, ?)`, [
         SETTING_NOTIFICATION_WEBHOOK_URL,
-        webhook.trim()
+        nextWebhook
       ]);
+      await sqlite.run(`INSERT OR REPLACE INTO kv_settings (key, value) VALUES (?, ?)`, [SETTING_APPLY_EMAIL, nextApplyEmail]);
+
+      setSavedLanguage(nextLanguage);
+      setSavedSerpApiKey(nextSerp);
+      setSavedGeminiApiKey(nextGem);
+      setSavedGeminiModel(nextModel);
+      setSavedWebhook(nextWebhook);
+      setSavedApplyEmail(nextApplyEmail);
       setCfgMsg("API settings saved.");
       bumpData();
     } catch (e) {
@@ -1557,6 +1885,14 @@ function ConfigPanel(props: {
     try {
       const now = new Date().toISOString();
       const loc = currentLocation.trim();
+      const nextWebsite = website.trim();
+      const nextPhone = phone.trim();
+      const nextLinkedinUrl = linkedinUrl.trim();
+      const nextPreferredCompRange = preferredCompRange.trim();
+      const nextCoverLetterTemplate = coverLetterTemplate.trim();
+      const nextWorkHistory = workHistory.trim();
+      const nextSkills = skills.trim();
+      const nextEssay = essay.trim();
 
       await sqlite.run(
         `UPDATE users SET email = ?, full_name = ?, location = ?, current_location = ?, phone = ?, linkedin_url = ?, preferred_comp_range = ?, cover_letter_template = ?, website = ?, work_history = ?, skills = ?, essay = ?, updated_at = ?
@@ -1566,18 +1902,30 @@ function ConfigPanel(props: {
           fn,
           loc,
           loc,
-          phone.trim(),
-          linkedinUrl.trim(),
-          preferredCompRange.trim(),
-          coverLetterTemplate.trim(),
-          website.trim(),
-          workHistory.trim(),
-          skills.trim(),
-          essay.trim(),
+          nextPhone,
+          nextLinkedinUrl,
+          nextPreferredCompRange,
+          nextCoverLetterTemplate,
+          nextWebsite,
+          nextWorkHistory,
+          nextSkills,
+          nextEssay,
           now,
           userId
         ]
       );
+
+      setSavedFullName(fn);
+      setSavedEmail(em);
+      setSavedWebsite(nextWebsite);
+      setSavedCurrentLocation(loc);
+      setSavedPhone(nextPhone);
+      setSavedLinkedinUrl(nextLinkedinUrl);
+      setSavedPreferredCompRange(nextPreferredCompRange);
+      setSavedCoverLetterTemplate(nextCoverLetterTemplate);
+      setSavedWorkHistory(nextWorkHistory);
+      setSavedSkills(nextSkills);
+      setSavedEssay(nextEssay);
       setCfgMsg("Profile saved.");
       bumpData();
     } catch (e) {
@@ -1594,6 +1942,7 @@ function ConfigPanel(props: {
   const fi =
     "mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100";
   const lb = "block text-sm font-medium text-gray-700 dark:text-gray-300";
+  const st = "mt-1 text-xs text-gray-500 dark:text-gray-400";
 
   return (
     <div className="max-w-xl space-y-8">
@@ -1695,30 +2044,42 @@ function ConfigPanel(props: {
               Français
             </label>
           </div>
+          <p className={st}>Saved: {savedLanguage === "fr" ? "Français" : "English"}</p>
         </div>
         <div>
           <label className={lb} htmlFor="cf-serp">
             SerpApi API key
           </label>
           <input id="cf-serp" className={fi} value={serpApiKey} onChange={(ev) => setSerpApiKey(ev.target.value)} autoComplete="off" />
+          <p className={st}>Saved: {configFieldStatus(savedSerpApiKey, { secret: true })}</p>
         </div>
         <div>
           <label className={lb} htmlFor="cf-gem">
             Gemini API key
           </label>
           <input id="cf-gem" className={fi} value={geminiApiKey} onChange={(ev) => setGeminiApiKey(ev.target.value)} autoComplete="off" />
+          <p className={st}>Saved: {configFieldStatus(savedGeminiApiKey, { secret: true })}</p>
         </div>
         <div>
           <label className={lb} htmlFor="cf-mod">
             Gemini model
           </label>
           <input id="cf-mod" className={fi} value={geminiModel} onChange={(ev) => setGeminiModel(ev.target.value)} autoComplete="off" />
+          <p className={st}>Saved: {configFieldStatus(savedGeminiModel)}</p>
         </div>
         <div>
           <label className={lb} htmlFor="cf-wh">
             Webhook URL (digest notifications)
           </label>
           <input id="cf-wh" className={fi} value={webhook} onChange={(ev) => setWebhook(ev.target.value)} autoComplete="off" />
+          <p className={st}>Saved: {configFieldStatus(savedWebhook)}</p>
+        </div>
+        <div>
+          <label className={lb} htmlFor="cf-apply-email">
+            Apply email (registration)
+          </label>
+          <input id="cf-apply-email" type="email" className={fi} value={applyEmail} onChange={(ev) => setApplyEmail(ev.target.value)} autoComplete="off" />
+          <p className={st}>Saved: {configFieldStatus(savedApplyEmail)}</p>
         </div>
         <button
           type="button"
@@ -1737,66 +2098,77 @@ function ConfigPanel(props: {
             Full name
           </label>
           <input id="cf-fn" className={fi} value={fullName} onChange={(ev) => setFullName(ev.target.value)} />
+          <p className={st}>Saved: {configFieldStatus(savedFullName)}</p>
         </div>
         <div>
           <label className={lb} htmlFor="cf-em">
             Email
           </label>
           <input id="cf-em" type="email" className={fi} value={email} onChange={(ev) => setEmail(ev.target.value)} />
+          <p className={st}>Saved: {configFieldStatus(savedEmail)}</p>
         </div>
         <div>
           <label className={lb} htmlFor="cf-site">
             Website
           </label>
           <input id="cf-site" className={fi} value={website} onChange={(ev) => setWebsite(ev.target.value)} />
+          <p className={st}>Saved: {configFieldStatus(savedWebsite)}</p>
         </div>
         <div>
           <label className={lb} htmlFor="cf-loc">
             Location
           </label>
           <input id="cf-loc" className={fi} value={currentLocation} onChange={(ev) => setCurrentLocation(ev.target.value)} />
+          <p className={st}>Saved: {configFieldStatus(savedCurrentLocation)}</p>
         </div>
         <div>
           <label className={lb} htmlFor="cf-ph">
             Phone
           </label>
           <input id="cf-ph" className={fi} value={phone} onChange={(ev) => setPhone(ev.target.value)} />
+          <p className={st}>Saved: {configFieldStatus(savedPhone)}</p>
         </div>
         <div>
           <label className={lb} htmlFor="cf-li">
             LinkedIn URL
           </label>
           <input id="cf-li" className={fi} value={linkedinUrl} onChange={(ev) => setLinkedinUrl(ev.target.value)} />
+          <p className={st}>Saved: {configFieldStatus(savedLinkedinUrl)}</p>
         </div>
         <div>
           <label className={lb} htmlFor="cf-comp">
             Preferred compensation range
           </label>
           <input id="cf-comp" className={fi} value={preferredCompRange} onChange={(ev) => setPreferredCompRange(ev.target.value)} />
+          <p className={st}>Saved: {configFieldStatus(savedPreferredCompRange)}</p>
         </div>
         <div>
           <label className={lb} htmlFor="cf-cover">
             Cover letter template
           </label>
           <textarea id="cf-cover" rows={5} className={fi} value={coverLetterTemplate} onChange={(ev) => setCoverLetterTemplate(ev.target.value)} />
+          <p className={st}>Saved: {configFieldStatus(savedCoverLetterTemplate, { multiline: true })}</p>
         </div>
         <div>
           <label className={lb} htmlFor="cf-whist">
             Work history
           </label>
           <textarea id="cf-whist" rows={6} className={fi} value={workHistory} onChange={(ev) => setWorkHistory(ev.target.value)} />
+          <p className={st}>Saved: {configFieldStatus(savedWorkHistory, { multiline: true })}</p>
         </div>
         <div>
           <label className={lb} htmlFor="cf-sk">
             Skills
           </label>
           <textarea id="cf-sk" rows={3} className={fi} value={skills} onChange={(ev) => setSkills(ev.target.value)} />
+          <p className={st}>Saved: {configFieldStatus(savedSkills, { multiline: true })}</p>
         </div>
         <div>
           <label className={lb} htmlFor="cf-essay">
             Writing sample (essay)
           </label>
           <textarea id="cf-essay" rows={6} className={fi} value={essay} onChange={(ev) => setEssay(ev.target.value)} />
+          <p className={st}>Saved: {configFieldStatus(savedEssay, { multiline: true })}</p>
         </div>
         <button
           type="button"

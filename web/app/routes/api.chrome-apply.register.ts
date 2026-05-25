@@ -19,7 +19,7 @@ export async function action({ request }: ActionFunctionArgs) {
   const geminiModel =
     typeof body.geminiModel === "string" && body.geminiModel.trim()
       ? body.geminiModel.trim()
-      : "gemini-3-flash-preview";
+      : "gemini-3.1-flash-lite";
   const payload = body.payload;
 
   if (!geminiApiKey || !payload?.id) {

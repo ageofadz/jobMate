@@ -57,6 +57,9 @@ export function migrateBrowserApplicationSchema(db: SqlJsDatabase) {
   ensureColumn(db, "jobs", "applied_at_linkedin_links", "applied_at_linkedin_links TEXT NOT NULL DEFAULT '[]'");
   ensureColumn(db, "assets", "file_blob", "file_blob BLOB");
   ensureColumn(db, "users", "resume_asset_id", "resume_asset_id TEXT");
+  ensureColumn(db, "jobs", "email_status", "email_status TEXT");
+  ensureColumn(db, "jobs", "posted_at", "posted_at TEXT");
+  ensureColumn(db, "jobs", "company_logo_url", "company_logo_url TEXT");
 
   if (!kvHas(db, "jobmate_resume_profile_backfill")) {
     db.run(`UPDATE users SET resume_asset_id = (

@@ -14,6 +14,7 @@ import {
 } from "@/lib/data";
 import { getEnv, getFilesDir } from "@/lib/env";
 import { registerChromeApplyPayload, type ChromeApplyPayload } from "@/lib/chrome-extension/payload-server";
+import { getApplyEmail } from "@/lib/settings-store";
 import { openUrlsInChromeWindow } from "@/lib/open-chrome";
 
 function base64(buffer: Buffer) {
@@ -124,6 +125,8 @@ export async function runApplyJobChromeExtension(jobId: string, userId: string) 
     writingSample: profile?.essay ?? "",
     coverLetterTemplate: profile?.coverLetterTemplate ?? "",
     coverLetterText: "",
+    candidateEmail: getApplyEmail() || profile?.email?.trim() || "",
+    candidateFullName: profile?.fullName?.trim() ?? "",
     resumeUpload,
     coverUpload: null,
     linkedinLinks: (Array.isArray(job.linkedinLinks) ? job.linkedinLinks : []).map((x) => String(x)).filter(Boolean),

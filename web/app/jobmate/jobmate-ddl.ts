@@ -76,6 +76,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   cover_letter_asset_id TEXT,
   status TEXT NOT NULL,
   discovered_at TEXT NOT NULL,
+  posted_at TEXT,
+  company_logo_url TEXT,
   applied_at TEXT,
   archived_at TEXT,
   created_at TEXT NOT NULL,

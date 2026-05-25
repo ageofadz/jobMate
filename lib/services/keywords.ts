@@ -1,5 +1,6 @@
 import { uniq } from "@/lib/utils";
 import type { PreferenceInput } from "@/lib/validators";
+import { isJobTeaserBoardDomain } from "@/lib/services/jobteaser";
 
 export function buildGeneratedKeywords(input: PreferenceInput) {
   const title = input.title.toLowerCase();
@@ -56,6 +57,10 @@ export function buildSearchQueries(input: PreferenceInput) {
     const normalizedDomain = domain.trim().toLowerCase();
     const isLeverBoard =
       normalizedDomain === "lever.co" || normalizedDomain === "jobs.lever.co";
+
+    if (isJobTeaserBoardDomain(normalizedDomain)) {
+      continue;
+    }
 
     if (isLeverBoard) {
       queries.push(leverJobsCombinedSearchQuery(titleAndSeeds, input.locations).trim());

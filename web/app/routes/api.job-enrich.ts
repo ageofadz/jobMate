@@ -1,6 +1,6 @@
 import type { ActionFunctionArgs } from "react-router";
 
-import { enrichJobLeadMetadata } from "../../../lib/services/job-enrichment";
+import { enrichJobLeadMetadata, extractCompensationRange } from "../../../lib/services/job-enrichment";
 import { generateJobDetailsSummary } from "../../../lib/services/llm";
 import { searchGoogleOrganicWithApiKey } from "../../../lib/services/serp";
 
@@ -23,6 +23,7 @@ export async function action({ request }: ActionFunctionArgs) {
     parsedHiringContacts?: string[];
     parsedSummary?: string;
     parsedCompensationRange?: string | null;
+    includeLeadSearch?: boolean;
   };
 
   try {
@@ -53,20 +54,34 @@ export async function action({ request }: ActionFunctionArgs) {
   const parsedSummary = typeof body.parsedSummary === "string" ? body.parsedSummary : "";
   const parsedCompensationRange =
     typeof body.parsedCompensationRange === "string" ? body.parsedCompensationRange.trim() : body.parsedCompensationRange ?? null;
+  const includeLeadSearch = body.includeLeadSearch === true;
 
   const fetchOrganic =
     serpApiKey.length > 0
       ? (query: string, limit: number) => searchGoogleOrganicWithApiKey(serpApiKey, query, limit)
       : (_query: string, _limit: number) => Promise.resolve([]);
 
-  const leadMetadata = await enrichJobLeadMetadata({
-    company,
-    listingText,
-    sourceUrl,
-    parsedHomepage: parsedHomepage ?? null,
-    parsedLinkedinLinks,
-    fetchOrganic
-  });
+  let compensationRange = parsedCompensationRange ?? extractCompensationRange(listingText);
+  let companyHomepage = parsedHomepage?.trim() ? parsedHomepage : null;
+  let linkedinLinks: string[] = [];
+  let hiringContacts: string[] = [];
+
+  if (includeLeadSearch) {
+    const leadMetadata = await enrichJobLeadMetadata({
+      company,
+      listingText,
+      sourceUrl,
+      parsedHomepage: parsedHomepage ?? null,
+      parsedLinkedinLinks,
+      fetchOrganic
+    });
+    compensationRange = leadMetadata.compensationRange ?? compensationRange;
+    companyHomepage = leadMetadata.companyHomepage ?? companyHomepage;
+    linkedinLinks =
+      leadMetadata.linkedinLinks.length > 0 ? leadMetadata.linkedinLinks : parsedLinkedinLinks;
+    hiringContacts =
+      leadMetadata.hiringContacts.length > 0 ? leadMetadata.hiringContacts : parsedHiringContacts;
+  }
 
   const geminiApiKey = typeof body.geminiApiKey === "string" ? body.geminiApiKey.trim() : "";
   const geminiModel = typeof body.geminiModel === "string" ? body.geminiModel.trim() : body.geminiModel ?? null;
@@ -82,14 +97,9 @@ export async function action({ request }: ActionFunctionArgs) {
     geminiApiKey ? { apiKey: geminiApiKey, model: geminiModel } : undefined
   );
 
-  const linkedinLinks =
-    leadMetadata.linkedinLinks.length > 0 ? leadMetadata.linkedinLinks : parsedLinkedinLinks;
-  const hiringContacts =
-    leadMetadata.hiringContacts.length > 0 ? leadMetadata.hiringContacts : parsedHiringContacts;
-
   return Response.json({
-    compensationRange: leadMetadata.compensationRange ?? parsedCompensationRange ?? null,
-    companyHomepage: leadMetadata.companyHomepage ?? (parsedHomepage?.trim() ? parsedHomepage : null),
+    compensationRange,
+    companyHomepage,
     linkedinLinks,
     hiringContacts,
     summary: summaryStored

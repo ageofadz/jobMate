@@ -17,6 +17,7 @@ import {
 } from "../lib/data";
 import { getEnv, getFilesDir } from "../lib/env";
 import {
+  getApplyEmail,
   getGeminiApiKey,
   getGeminiModel,
   getNotificationWebhookUrl,
@@ -24,6 +25,7 @@ import {
   getLanguageSetting,
   getSerpApiKey,
   setSetting,
+  SETTING_APPLY_EMAIL,
   SETTING_CHROME_EXTENSION_OUTPUT_DIR,
   SETTING_GEMINI_API_KEY,
   SETTING_GEMINI_MODEL,
@@ -190,6 +192,10 @@ export async function runApiSettings() {
       message: "API keys & models",
       choices: [
         {
+          name: `Apply email (${getApplyEmail() ?? "uses profile email"})`,
+          value: "applyEmail"
+        },
+        {
           name: `SerpApi key (${mask(getSerpApiKey())})`,
           value: "serp"
         },
@@ -213,7 +219,13 @@ export async function runApiSettings() {
       return;
     }
 
-    if (action === "serp") {
+    if (action === "applyEmail") {
+      const v = await input({
+        message: "Email address for job applications (leave blank to use profile email)",
+        default: getApplyEmail() ?? ""
+      });
+      setSetting(SETTING_APPLY_EMAIL, v.trim());
+    } else if (action === "serp") {
       const v = await input({
         message: "SerpApi API key",
         default: getSerpApiKey() ?? ""
@@ -230,7 +242,7 @@ export async function runApiSettings() {
         message: "Gemini model",
         default: getGeminiModel()
       });
-      setSetting(SETTING_GEMINI_MODEL, v.trim() || "gemini-3-flash-preview");
+      setSetting(SETTING_GEMINI_MODEL, v.trim() || "gemini-3.1-flash-lite");
     } else if (action === "webhook") {
       const v = await input({
         message: "Webhook URL (optional)",

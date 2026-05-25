@@ -4,7 +4,7 @@ import { input } from "@inquirer/prompts";
 import { insertPreference, updatePreference } from "../lib/data";
 import { translate } from "../lib/i18n";
 import { reportError } from "./report-error";
-import { preferenceInputSchema } from "../lib/validators";
+import { formatLocationsForInput, preferenceInputSchema, splitLocations } from "../lib/validators";
 import type { PreferenceInput } from "../lib/validators";
 
 export async function promptPreferenceInput(_userId: string, defaults?: Partial<PreferenceInput>) {
@@ -14,11 +14,12 @@ export async function promptPreferenceInput(_userId: string, defaults?: Partial<
 
   const locationsRaw = await input({
     message: translate("locationsPrompt"),
+    default: defaults?.locations?.length ? formatLocationsForInput(defaults.locations) : undefined
   });
 
   const boardDomainsRaw = await input({
     message: translate("boardDomainsPrompt"),
-    default: defaults?.boardDomains?.join(", ") ?? "boards.greenhouse.io, lever.co"
+    default: defaults?.boardDomains?.join(", ") ?? "boards.greenhouse.io, lever.co, jobteaser.com, workatastartup.com"
   });
 
   const keywordSeedRaw = await input({
@@ -60,10 +61,7 @@ export async function promptPreferenceInput(_userId: string, defaults?: Partial<
 
   return preferenceInputSchema.parse({
     title,
-    locations: locationsRaw
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean),
+    locations: splitLocations(locationsRaw),
     boardDomains: boardDomainsRaw
       .split(",")
       .map((s) => s.trim())

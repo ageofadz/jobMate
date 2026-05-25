@@ -1,5 +1,6 @@
 import type { ActionFunctionArgs } from "react-router";
 
+import { ensureChromeApplyCoverLetter } from "../../../lib/services/apply-cover-letter";
 import { generateFormAnswers } from "../../../lib/services/llm";
 
 import { chromeApplyCorsHeaders, getChromeApplySession } from "../chrome-apply-sessions.server";
@@ -29,9 +30,19 @@ export async function action({ request, params }: ActionFunctionArgs) {
       required: boolean;
       options: string[];
     }>;
+    pageLanguage?: string;
+    retryNote?: string;
   };
 
   const fields = body.fields ?? [];
+  const pageLanguage = typeof body.pageLanguage === "string" ? body.pageLanguage.trim().toLowerCase() : "";
+  const retryNote = typeof body.retryNote === "string" ? body.retryNote.trim() : "";
+
+  await ensureChromeApplyCoverLetter(session.payload, fields, {
+    gemini: { apiKey: session.geminiApiKey, model: session.geminiModel },
+    writeCoverTextFile: false,
+    pageLanguage: pageLanguage || undefined
+  });
 
   const resumePdf = session.payload.resumeUpload?.base64
     ? Buffer.from(session.payload.resumeUpload.base64, "base64")
@@ -45,18 +56,28 @@ export async function action({ request, params }: ActionFunctionArgs) {
     resumePdf,
     coverLetterText: session.payload.coverLetterText,
     writingSample: session.payload.writingSample,
+    attemptNote: retryNote || undefined,
     gemini: { apiKey: session.geminiApiKey, model: session.geminiModel }
   });
 
-  const answers = fields.map((field) => ({
-    fieldId: field.fieldId,
-    answer: answersMap.get(field.fieldId)?.answer ?? "",
-    reasoning: answersMap.get(field.fieldId)?.reasoning ?? "No answer returned."
-  }));
+  const resumeFieldIds: string[] = [];
+  const answers = fields.map((field) => {
+    const raw = answersMap.get(field.fieldId)?.answer ?? "";
+    if (raw === "__resume__") {
+      resumeFieldIds.push(field.fieldId);
+      return { fieldId: field.fieldId, answer: "", reasoning: answersMap.get(field.fieldId)?.reasoning ?? "" };
+    }
+    return {
+      fieldId: field.fieldId,
+      answer: raw === "__cover_letter__" ? "" : raw,
+      reasoning: answersMap.get(field.fieldId)?.reasoning ?? "No answer returned."
+    };
+  });
 
   return Response.json(
     {
       answers,
+      resumeFieldIds,
       coverLetterText: session.payload.coverLetterText,
       coverUpload: session.payload.coverUpload
     },

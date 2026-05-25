@@ -215,7 +215,7 @@ export function BrowserSetupWizard(props: { sqlite: JobmateSqlite; userId: strin
   const [language, setLanguage] = useState<"en" | "fr">("en");
   const [serpApiKey, setSerpApiKey] = useState("");
   const [geminiApiKey, setGeminiApiKey] = useState("");
-  const [geminiModel, setGeminiModel] = useState("gemini-3-flash-preview");
+  const [geminiModel, setGeminiModel] = useState("gemini-3.1-flash-lite");
   const [webhook, setWebhook] = useState("");
   const [website, setWebsite] = useState("");
   const [currentLocation, setCurrentLocation] = useState("");
@@ -285,7 +285,7 @@ export function BrowserSetupWizard(props: { sqlite: JobmateSqlite; userId: strin
 
         setSerpApiKey(serp[0]?.value ?? "");
         setGeminiApiKey(gem[0]?.value ?? "");
-        setGeminiModel(mod[0]?.value?.trim() ? String(mod[0].value) : "gemini-3-flash-preview");
+        setGeminiModel(mod[0]?.value?.trim() ? String(mod[0].value) : "gemini-3.1-flash-lite");
         setWebhook(hook[0]?.value ?? "");
       } finally {
         if (!cancelled) {
@@ -321,7 +321,7 @@ export function BrowserSetupWizard(props: { sqlite: JobmateSqlite; userId: strin
     try {
       const now = new Date().toISOString();
       const loc = currentLocation.trim();
-      const modelTrim = geminiModel.trim() || "gemini-3-flash-preview";
+      const modelTrim = geminiModel.trim() || "gemini-3.1-flash-lite";
       const workHistory = String(profileRow.work_history ?? "");
 
       await sqlite.run(`INSERT OR REPLACE INTO kv_settings (key, value) VALUES (?, ?)`, [

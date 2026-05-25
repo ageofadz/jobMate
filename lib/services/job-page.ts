@@ -2,10 +2,13 @@ import * as cheerio from "cheerio";
 
 import { normalizeApplyUrl } from "@/lib/apply-url";
 import { listingHtmlHeaders } from "@/lib/listing-html-headers";
-import { extractCompensationRange, extractEmails, extractLinkedinLinks } from "@/lib/services/job-enrichment";
+import { extractCompensationRange } from "@/lib/services/job-enrichment";
 import { inferCompanyNameFromListing, inferJobListingCoreFields } from "@/lib/services/llm";
+import { isWorkAtAStartupListingUrl } from "@/lib/services/workatstartup";
 import type { ParsedJobPage } from "@/lib/types";
 import { slugify } from "@/lib/utils";
+
+export { extractJobListingUrlsFromHtml } from "@/lib/services/job-listing-urls";
 
 function pickContent($: cheerio.CheerioAPI, selectors: string[]) {
   for (const selector of selectors) {
@@ -197,6 +200,153 @@ function textFromJsonLdJobLocation(payload: unknown): string {
   return "";
 }
 
+function normalizePostedAt(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const parsed = Date.parse(trimmed);
+  if (Number.isNaN(parsed)) {
+    return null;
+  }
+
+  return new Date(parsed).toISOString();
+}
+
+function textFromJsonLdDatePosted(payload: unknown): string {
+  if (!payload || typeof payload !== "object") {
+    return "";
+  }
+
+  if (Array.isArray(payload)) {
+    for (const item of payload) {
+      const value = textFromJsonLdDatePosted(item);
+      if (value) {
+        return value;
+      }
+    }
+
+    return "";
+  }
+
+  const record = payload as Record<string, unknown>;
+  const rawType = record["@type"];
+  const typeLabels = Array.isArray(rawType)
+    ? rawType.map((t) => String(t).toLowerCase())
+    : [String(rawType ?? "").toLowerCase()];
+
+  if (typeLabels.some((t) => t.includes("jobposting"))) {
+    const datePosted = String(record.datePosted ?? record.dateposted ?? "").trim();
+    if (datePosted) {
+      return datePosted;
+    }
+  }
+
+  for (const value of Object.values(record)) {
+    const nested = textFromJsonLdDatePosted(value);
+    if (nested) {
+      return nested;
+    }
+  }
+
+  return "";
+}
+
+function textFromJsonLdLogo(payload: unknown): string {
+  if (!payload || typeof payload !== "object") {
+    return "";
+  }
+
+  if (Array.isArray(payload)) {
+    for (const item of payload) {
+      const value = textFromJsonLdLogo(item);
+      if (value) {
+        return value;
+      }
+    }
+
+    return "";
+  }
+
+  const record = payload as Record<string, unknown>;
+  const rawType = record["@type"];
+  const typeLabels = Array.isArray(rawType)
+    ? rawType.map((t) => String(t).toLowerCase())
+    : [String(rawType ?? "").toLowerCase()];
+
+  if (typeLabels.some((t) => t.includes("jobposting"))) {
+    const org = record.hiringOrganization;
+    if (org && typeof org === "object" && !Array.isArray(org)) {
+      const logo = (org as Record<string, unknown>).logo;
+      if (typeof logo === "string" && logo.trim()) {
+        return logo.trim();
+      }
+      if (logo && typeof logo === "object" && !Array.isArray(logo)) {
+        const url = String((logo as Record<string, unknown>).url ?? "").trim();
+        if (url) {
+          return url;
+        }
+      }
+    }
+  }
+
+  if (typeLabels.some((t) => t.includes("organization"))) {
+    const logo = record.logo;
+    if (typeof logo === "string" && logo.trim()) {
+      return logo.trim();
+    }
+    if (logo && typeof logo === "object" && !Array.isArray(logo)) {
+      const url = String((logo as Record<string, unknown>).url ?? "").trim();
+      if (url) {
+        return url;
+      }
+    }
+  }
+
+  for (const value of Object.values(record)) {
+    const nested = textFromJsonLdLogo(value);
+    if (nested) {
+      return nested;
+    }
+  }
+
+  return "";
+}
+
+function extractCompanyLogoUrl($: cheerio.CheerioAPI, sourceUrl: string, jsonLdLogo: string): string | null {
+  const candidates: string[] = [];
+
+  if (jsonLdLogo.trim()) {
+    candidates.push(jsonLdLogo.trim());
+  }
+
+  const ogImage = String($("meta[property='og:image']").attr("content") ?? "").trim();
+  if (ogImage) {
+    candidates.push(ogImage);
+  }
+
+  $("[data-testid='jobad-card-company-logo'], [data-testid='job-detail-company-logo'], img[class*='logo' i], img[alt*='logo' i]")
+    .each((_, node) => {
+      const src = String($(node).attr("src") ?? "").trim();
+      if (src) {
+        candidates.push(src);
+      }
+    });
+
+  for (const candidate of candidates) {
+    try {
+      const absolute = new URL(candidate, sourceUrl).toString();
+      if (/^https?:\/\//i.test(absolute)) {
+        return absolute;
+      }
+    } catch {
+    }
+  }
+
+  return null;
+}
+
 function pickListingTitle(jsonLdTitle: string, domTitle: string, serpFallback: string): string {
   const norm = (value: string) => value.replace(/\s+/g, " ").trim();
   const fromLd = norm(jsonLdTitle);
@@ -359,6 +509,18 @@ function normalizeCompanyName(value: string) {
   return clean;
 }
 
+function extractWorkAtAStartupListingText($: cheerio.CheerioAPI) {
+  const sections = [
+    $("div.my-3.rounded-md.border.border-gray-300.bg-beige-lighter.p-3").first().text(),
+    $("main").text(),
+    $("body").text()
+  ]
+    .map((value) => value.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+
+  return Array.from(new Set(sections)).join("\n\n");
+}
+
 export async function parseJobHtml(
   html: string,
   sourceUrl: string,
@@ -379,6 +541,8 @@ export async function parseJobHtml(
   let jsonLdCompany = "";
   let jsonLdJobTitle = "";
   let jsonLdLocation = "";
+  let jsonLdDatePosted = "";
+  let jsonLdLogo = "";
 
   for (const raw of jsonLdScripts) {
     try {
@@ -395,10 +559,18 @@ export async function parseJobHtml(
       if (!jsonLdLocation) {
         jsonLdLocation = textFromJsonLdJobLocation(parsed);
       }
+
+      if (!jsonLdDatePosted) {
+        jsonLdDatePosted = textFromJsonLdDatePosted(parsed);
+      }
+
+      if (!jsonLdLogo) {
+        jsonLdLogo = textFromJsonLdLogo(parsed);
+      }
     } catch {
     }
 
-    if (jsonLdCompany && jsonLdJobTitle && jsonLdLocation) {
+    if (jsonLdCompany && jsonLdJobTitle && jsonLdLocation && jsonLdDatePosted && jsonLdLogo) {
       break;
     }
   }
@@ -408,8 +580,9 @@ export async function parseJobHtml(
     pickContent($, ["h1", "[data-ui='job-title']", ".app-title"]) ||
     "";
 
-  const listingText =
-    $("main").text().replace(/\s+/g, " ").trim() || $("body").text().replace(/\s+/g, " ").trim();
+  const listingText = isWorkAtAStartupListingUrl(sourceUrl)
+    ? extractWorkAtAStartupListingText($)
+    : $("main").text().replace(/\s+/g, " ").trim() || $("body").text().replace(/\s+/g, " ").trim();
 
   const structuredHints = [
     jsonLdJobTitle && `jobPostingTitle: ${jsonLdJobTitle}`,
@@ -539,11 +712,12 @@ export async function parseJobHtml(
     })
     .get()
     .filter(Boolean);
-  const applyUrl =
-    $("a")
-      .filter((_, node) => /apply/i.test($(node).text()))
-      .first()
-      .attr("href") || sourceUrl;
+  const applyUrl = isWorkAtAStartupListingUrl(sourceUrl)
+    ? sourceUrl
+    : $("a")
+        .filter((_, node) => /apply|postuler|candidature/i.test($(node).text()))
+        .first()
+        .attr("href") || sourceUrl;
 
   const fields = $("form")
     .find("input, textarea, select")
@@ -582,6 +756,8 @@ export async function parseJobHtml(
     .get();
 
   const resolvedApply = applyUrl.startsWith("http") ? applyUrl : new URL(applyUrl, sourceUrl).toString();
+  const postedAt = normalizePostedAt(jsonLdDatePosted);
+  const companyLogoUrl = extractCompanyLogoUrl($, sourceUrl, jsonLdLogo);
 
   return {
     title,
@@ -593,10 +769,12 @@ export async function parseJobHtml(
     compensationRange: extractCompensationRange(listingText),
     companyHomepage:
       links.find((link) => /\/(?:company|about|home|careers?)\/?$/i.test(new URL(link).pathname)) ??
-      links.find((link) => !/greenhouse|lever|workday|ashbyhq|linkedin|indeed|glassdoor/i.test(link)) ??
+      links.find((link) => !/greenhouse|lever|workday|ashbyhq|linkedin|indeed|glassdoor|jobteaser|workatastartup/i.test(link)) ??
       null,
-    linkedinLinks: [...extractLinkedinLinks(html), ...links.filter((link) => /linkedin\.com/i.test(link))],
-    hiringContacts: extractEmails(html),
+    companyLogoUrl,
+    postedAt,
+    linkedinLinks: [],
+    hiringContacts: [],
     fields
   } satisfies ParsedJobPage;
 }

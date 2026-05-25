@@ -100,8 +100,8 @@ async function callGeminiParts(apiKey: string, model: string, parts: GeminiUserP
         ],
         generationConfig: json
           ? {
-              responseMimeType: "application/json"
-            }
+            responseMimeType: "application/json"
+          }
           : undefined
       })
     }
@@ -124,6 +124,54 @@ async function callGeminiParts(apiKey: string, model: string, parts: GeminiUserP
   }
 
   return text;
+}
+
+export type EmailJobStatus = "rejected" | "waiting" | "needs_action" | null;
+
+export async function classifyJobEmailStatus(params: {
+  geminiApiKey: string | null;
+  geminiModel: string;
+  jobs: { id: string; company: string; sourceTitle: string; appliedAt: string }[];
+  inboxText: string;
+}): Promise<{ jobId: string; emailStatus: EmailJobStatus; evidence: string }[]> {
+  if (!params.geminiApiKey?.trim() || !params.jobs.length || !params.inboxText.trim()) {
+    return params.jobs.map((j) => ({ jobId: j.id, emailStatus: null, evidence: "" }));
+  }
+
+  const prompt = [
+    "You are checking an email inbox for job application status updates.",
+    "For each applied job below, determine if the inbox contains a meaningful status email.",
+    "IGNORE acknowledgment emails like 'We received your application', 'Thank you for applying', 'Application submitted' — these are expected and carry no status.",
+    "Look for: rejection emails, interview invitations, requests for more info, or other recruiter follow-ups.",
+    "If there is no meaningful status email for a job, return null for that job.",
+    `Status values: "rejected" (rejected/not selected), "waiting" (interview scheduled or awaiting response), "needs_action" (requires candidate action like completing a task or responding).`,
+    `Return valid JSON only with shape: {"updates":[{"jobId":"","emailStatus":"rejected"|"waiting"|"needs_action"|null,"evidence":"one sentence"}]}`,
+    `Applied jobs: ${JSON.stringify(params.jobs.map((j) => ({ id: j.id, company: j.company, title: j.sourceTitle, appliedAt: j.appliedAt })))}`,
+    `Inbox text (may be truncated): ${params.inboxText.slice(0, 12000)}`
+  ].join("\n\n");
+
+  const apiKey = params.geminiApiKey.trim();
+  const primary = params.geminiModel.trim() || "gemini-3.1-flash-lite";
+  const models = Array.from(new Set([primary, GEMINI_FALLBACK_MODEL, GEMINI_STABLE_FALLBACK_MODEL]));
+
+  for (const model of models) {
+    try {
+      const text = await callGeminiParts(apiKey, model, [{ text: prompt }], true);
+      const parsed = parseJsonObject(text) as {
+        updates?: Array<{ jobId: string; emailStatus: EmailJobStatus; evidence: string }>;
+      };
+
+      if (Array.isArray(parsed.updates)) {
+        return params.jobs.map((j) => {
+          const match = parsed.updates!.find((u) => u.jobId === j.id);
+          return { jobId: j.id, emailStatus: match?.emailStatus ?? null, evidence: match?.evidence ?? "" };
+        });
+      }
+    } catch {
+    }
+  }
+
+  return params.jobs.map((j) => ({ jobId: j.id, emailStatus: null, evidence: "" }));
 }
 
 export async function generateFieldAnswersWithGemini(params: {
@@ -159,9 +207,12 @@ export async function generateFieldAnswersWithGemini(params: {
       : "Use only the provided candidate context.",
     "Read each field label carefully and answer that exact question.",
     "Never answer a different question than the field asks.",
+    "Every field must receive an answer. Never leave a required field empty.",
+    "If a field asks about visa sponsorship, work authorization, immigration status, or legal right to work, answer truthfully from candidate context and choose the closest matching option.",
+    "If a field asks for a cover letter, motivation letter, or supporting statement, write a concise truthful answer from candidate context and the listing.",
     "Be concise, concrete, and truthful.",
     "Use normal capitalization. Do not return answers in all caps unless the field explicitly requires an acronym or code.",
-    "For optional demographic, equal opportunity, race, ethnicity, gender, pronoun, disability, or veteran self-identification fields, return an empty answer so the app can skip them.",
+    "For optional demographic, equal opportunity, race, ethnicity, gender, pronoun, disability, or veteran self-identification fields, choose the opt-out option when one exists.",
     "For required demographic/self-identification choice fields, choose the available option equivalent to 'I do not wish to answer', 'Decline to self-identify', 'Prefer not to say', or 'I don't want to answer'.",
     "For source/referral fields like 'How did you hear about this job?', answer exactly 'Google'.",
     "For yes/no fields, answer exactly 'Yes' or 'No'.",
@@ -185,7 +236,7 @@ export async function generateFieldAnswersWithGemini(params: {
   }
 
   const apiKey = params.geminiApiKey.trim();
-  const primary = params.geminiModel.trim() || "gemini-3-flash-preview";
+  const primary = params.geminiModel.trim() || "gemini-3.1-flash-lite";
   const models = Array.from(new Set([primary, GEMINI_FALLBACK_MODEL, GEMINI_STABLE_FALLBACK_MODEL]));
   let lastError = "";
 

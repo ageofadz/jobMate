@@ -13,11 +13,11 @@ type GeminiResponse = {
   }>;
 };
 
-const GEMINI_PRIMARY_MODEL = "gemini-3-flash-preview";
+const GEMINI_PRIMARY_MODEL = "gemini-3.1-flash-lite";
 const GEMINI_FALLBACK_MODEL = "gemini-2-flash";
 const GEMINI_STABLE_FALLBACK_MODEL = "gemini-2.5-flash";
 
-function parseJsonObject(text: string) {
+function parseJsonObject(text: string): unknown {
   const trimmed = text.trim();
 
   if (!trimmed) {
@@ -28,17 +28,53 @@ function parseJsonObject(text: string) {
   const candidate = fenced?.[1]?.trim() ?? trimmed;
 
   try {
-    return JSON.parse(candidate) as unknown;
+    return JSON.parse(candidate);
   } catch {
-    const start = candidate.indexOf("{");
-    const end = candidate.lastIndexOf("}");
+    // ignored
+  }
 
-    if (start >= 0 && end > start) {
-      return JSON.parse(candidate.slice(start, end + 1)) as unknown;
-    }
+  const start = candidate.indexOf("{");
 
+  if (start < 0) {
     throw new Error("LLM output did not contain a JSON object.");
   }
+
+  let depth = 0;
+  let inStr = false;
+  let escape = false;
+
+  for (let i = start; i < candidate.length; i++) {
+    const ch = candidate[i];
+
+    if (escape) {
+      escape = false;
+      continue;
+    }
+
+    if (ch === "\\") {
+      escape = true;
+      continue;
+    }
+
+    if (ch === '"') {
+      inStr = !inStr;
+      continue;
+    }
+
+    if (inStr) continue;
+
+    if (ch === "{") {
+      depth++;
+    } else if (ch === "}") {
+      depth--;
+
+      if (depth === 0) {
+        return JSON.parse(candidate.slice(start, i + 1));
+      }
+    }
+  }
+
+  throw new Error("LLM output did not contain a complete JSON object.");
 }
 
 function normalizeGeneratedPlainText(text: string) {
@@ -105,8 +141,8 @@ async function callGeminiGenerateWithKey(
           ],
           generationConfig: options.json
             ? {
-                responseMimeType: "application/json"
-              }
+              responseMimeType: "application/json"
+            }
             : undefined
         })
       }
@@ -191,9 +227,12 @@ export async function generateFieldAnswers(params: {
       : "Use only the provided candidate context and resume text.",
     "Read each field label carefully and answer that exact question.",
     "Never answer a different question than the field asks.",
+    "Every field must receive an answer. Never leave a required field empty.",
+    "If a field asks about visa sponsorship, work authorization, immigration status, or legal right to work, answer truthfully from candidate context and choose the closest matching option.",
+    "If a field asks for a cover letter, motivation letter, or supporting statement, write a concise truthful answer from candidate context and the listing.",
     "Be concise, concrete, and truthful.",
     "Use normal capitalization. Do not return answers in all caps unless the field explicitly requires an acronym or code.",
-    "For optional demographic, equal opportunity, race, ethnicity, gender, pronoun, disability, or veteran self-identification fields, return an empty answer so the app can skip them.",
+    "For optional demographic, equal opportunity, race, ethnicity, gender, pronoun, disability, or veteran self-identification fields, choose the opt-out option when one exists.",
     "For required demographic/self-identification choice fields, choose the available option equivalent to 'I do not wish to answer', 'Decline to self-identify', 'Prefer not to say', or 'I don't want to answer'.",
     "For source/referral fields like 'How did you hear about this job?', answer exactly 'Google'.",
     "For yes/no fields, answer exactly 'Yes' or 'No'.",
@@ -382,12 +421,12 @@ export async function generateJobDetailsSummary(
 
   const models = overrideKey
     ? Array.from(
-        new Set([
-          gemini?.model?.trim() || GEMINI_PRIMARY_MODEL,
-          GEMINI_FALLBACK_MODEL,
-          GEMINI_STABLE_FALLBACK_MODEL
-        ])
-      )
+      new Set([
+        gemini?.model?.trim() || GEMINI_PRIMARY_MODEL,
+        GEMINI_FALLBACK_MODEL,
+        GEMINI_STABLE_FALLBACK_MODEL
+      ])
+    )
     : getGeminiModels();
 
   try {
@@ -551,29 +590,32 @@ export async function generateFormAnswers(params: {
     "Read every field label literally. Do not move an answer from one field to another.",
     "For every answer, first identify what that exact field label is asking. The answer must fit that exact field label and its options.",
     "You must return exactly one answers item for every field in Fields JSON.",
+    "Every field must receive an answer. Never leave a required field empty.",
     hasPdf
-      ? "For required non-demographic fields, an empty answer is invalid. Use the candidate context and the attached resume PDF to answer them."
-      : "For required non-demographic fields, an empty answer is invalid. Use the candidate context and resume to answer them.",
+      ? "For required fields, an empty answer is invalid. Use the candidate context and the attached resume PDF to answer them."
+      : "For required fields, an empty answer is invalid. Use the candidate context and resume to answer them.",
     hasPdf
-      ? "Identity fields are mandatory when present: Full name must use the candidate name, Email must use the candidate email, Phone must use the candidate phone if present in context or resume PDF."
-      : "Identity fields are mandatory when present: Full name must use the candidate name, Email must use the candidate email, Phone must use the candidate phone if present in context or resume.",
+      ? "Identity fields are mandatory when present: Full name must use the candidate name, Email and any confirm-email or email-confirmation field must use the candidate email, Phone must use the candidate phone if present in context or resume PDF."
+      : "Identity fields are mandatory when present: Full name must use the candidate name, Email and any confirm-email or email-confirmation field must use the candidate email, Phone must use the candidate phone if present in context or resume.",
+    "If a field asks about visa sponsorship, work authorization, immigration status, or legal right to work, answer truthfully from candidate context and choose the closest matching option.",
+    "If a field asks for a cover letter, motivation letter, letter of interest, or supporting statement, use the provided cover letter tool.",
+    "If a field is asking for an uploaded supporting document or extra attachment that belongs with the application, treat that as a cover-letter request and use the provided cover letter tool when the field expects text content.",
+    "If a field asks for a message to the recruitment or hiring team, what motivates the candidate, why they want to join, or why this role is their next challenge, use the provided cover letter tool.",
+    "If a field is asking why the candidate would be a strong addition to the team or culture, answer it as a culture-fit question focused on soft skills, collaboration style, values, and personal strengths, not technical experience, unless the field is clearly asking for a long motivation statement.",
+    "For culture-fit questions, use the candidate writing sample as the style reference when one is provided.",
+    "Never return a filename, file path, or PDF name as an answer.",
+    "For file-type fields: if the field is asking for a resume, CV, curriculum vitae, or any equivalent in any language, return exactly \"__resume__\". If the field is asking for a cover letter, motivation letter, or supporting document, return exactly \"__cover_letter__\". For any other file field, return an empty string.",
+    "Never use the cover letter text for location, source/how-heard, authorization, short answer, URL, or phone fields unless the field is clearly asking for a long written statement.",
     "If a field asks for current location/city/state, answer only the location value, for example 'Chicago, IL'.",
     "Location answers must be under 80 characters.",
     "If a field asks how the candidate heard about the job, answer exactly 'Google'.",
     "How-heard/source answers must be exactly 'Google' and must not be a sentence about the candidate.",
     "Determine the field's intent semantically from its label, key, type, and options, not by keyword matching alone.",
-    "If a field is asking for an uploaded supporting document or extra attachment that belongs with the application, treat that as a cover-letter request and use the provided cover letter text when the field expects text content.",
-    "If a field is asking why the candidate would be a strong addition to the team or culture, answer it as a culture-fit question focused on soft skills, collaboration style, values, and personal strengths, not technical experience.",
-    "For culture-fit questions, use the candidate writing sample as the style reference when one is provided.",
-    "If and only if a field is semantically asking for a cover letter, letter of interest, uploaded supporting letter, or a long application statement, use the provided cover letter text.",
-    "Never use the cover letter text for location, source/how-heard, authorization, short answer, URL, phone, or choice fields.",
-    "If a field asks for a URL, answer only a URL. If a field asks for a phone number and no phone is present, answer empty string.",
-    "Skip optional demographic/self-identification fields by returning empty string: pronouns, race, ethnicity, gender, disability, veteran, EEO, equal opportunity.",
+    "If a field asks for a URL, answer only a URL. For LinkedIn, answer the candidate's LinkedIn URL from context. For GitHub, answer the candidate's GitHub URL. For a personal website or portfolio, answer the candidate's website URL. For Twitter/X, Facebook, or other social network URLs, answer the candidate's URL for that network if present in context, otherwise leave empty.",
+    "For optional demographic/self-identification fields, choose the opt-out option when one exists; otherwise answer truthfully from context.",
     "For required demographic/self-identification choice fields, choose the option label equivalent to 'I do not wish to answer', 'Decline to self-identify', 'Prefer not to say', or 'I don't want to answer'.",
-    "Never leave a required non-demographic field empty.",
     "For radio, checkbox, and select fields, answer using option labels from that field's options.",
-    "For required radio, checkbox, and select fields, you must choose the best available option. For required demographic/self-identification fields, the best option is the opt-out equivalent.",
-    "Never leave a required non-demographic choice field empty.",
+    "For required radio, checkbox, and select fields, you must choose the best available option.",
     ...COMPENSATION_INSTRUCTIONS,
     "Use normal capitalization. Be concise, concrete, and truthful.",
     "Return valid JSON only with shape {\"answers\":[{\"fieldId\":\"\",\"answer\":\"\",\"reasoning\":\"\"}]}.",
@@ -639,25 +681,32 @@ export async function classifyApplicationFieldIntent(params: {
   key?: string;
   type?: string;
   options?: string[];
+  gemini?: { apiKey: string; model?: string | null };
 }) {
-  if (!hasGeminiKey()) {
-    return "other" as const;
+  const geminiApiKey = params.gemini?.apiKey?.trim() || getGeminiApiKey()?.trim();
+
+  if (!geminiApiKey) {
+    throw new Error("Gemini API key is required to classify application field intent.");
   }
+
+  const primaryModel = params.gemini?.model?.trim() || getGeminiModel() || GEMINI_PRIMARY_MODEL;
+  const models = Array.from(new Set([primaryModel, GEMINI_FALLBACK_MODEL, GEMINI_STABLE_FALLBACK_MODEL]));
 
   const prompt = [
     "Classify the intent of exactly one job application field.",
-    "Determine intent semantically from the label, key, type, and options. Do not rely on keyword matching alone.",
+    "Determine intent semantically from the label, key, type, and options.",
     "Return JSON only with shape {\"intent\":\"cover_letter_upload\"} or {\"intent\":\"culture_fit\"} or {\"intent\":\"other\"}.",
-    "Use cover_letter_upload when the field is asking for a cover letter, letter of interest, motivation letter, supporting letter, or long supporting statement, whether the UI expects a file upload or free text (textarea, text entry, or paste).",
+    "Use cover_letter_upload when the field is asking for a cover letter, letter of interest, motivation letter, message to the recruitment or hiring team, supporting letter, or long supporting statement, whether the UI expects a file upload or free text (textarea, text entry, or paste).",
+    "Use cover_letter_upload when the field asks what motivates the candidate, why they want to join, or why this role is their next challenge, if the answer is expected to be a long free-text application statement rather than a short culture-fit blurb.",
     "Use cover_letter_upload when the field type is file and the surrounding form section is clearly for a cover or supporting letter even if the visible label only says Attach, Upload, or similar.",
-    "Use culture_fit when the field is asking why the candidate would be a good addition to the team, culture, or work environment.",
+    "Use culture_fit only for short questions about team fit or culture where a brief answer is expected, not a full motivation statement.",
     `Field label: ${params.label}`,
     `Field key: ${params.key ?? ""}`,
     `Field type: ${params.type ?? ""}`,
     `Available options: ${JSON.stringify(params.options ?? [])}`
   ].join("\n\n");
 
-  const text = await callGeminiText(prompt, { json: true });
+  const text = await callGeminiGenerateWithKey([{ text: prompt }], geminiApiKey, models, { json: true });
   const parsed = parseJsonObject(text) as { intent?: string };
   const intent = String(parsed.intent ?? "");
 
@@ -666,6 +715,217 @@ export async function classifyApplicationFieldIntent(params: {
   }
 
   throw new Error(`Unrecognized field intent: ${intent || "empty"}`);
+}
+
+export type ApplyPageActionInput = {
+  actionId: string;
+  text: string;
+  tag: string;
+  href: string;
+  context: string;
+};
+
+export type ApplyPageFieldInput = {
+  fieldId: string;
+  key: string;
+  label: string;
+  type: string;
+  required: boolean;
+};
+
+export type BrowserTool =
+  | "navigate"
+  | "click"
+  | "type"
+  | "select"
+  | "fill_form"
+  | "wait"
+  | "blocked"
+  | "done";
+
+export type BrowserAction = {
+  tool: BrowserTool;
+  elementId: string | null;
+  url: string | null;
+  text: string | null;
+  value: string | null;
+  reasoning: string;
+  coverLetterElementIds: string[];
+  coverLetterRevealIds: string[];
+  resumeElementIds: string[];
+};
+
+export type BrowserStepHistoryItem = {
+  step: number;
+  tool: string;
+  reasoning?: string;
+  elementId?: string | null;
+  url?: string | null;
+};
+
+export type PageElement = {
+  elementId: string;
+  type: "action" | "field";
+  tag: string;
+  text: string;
+  href?: string;
+  context?: string;
+  fieldType?: string;
+  label?: string;
+  required?: boolean;
+  options?: string[];
+};
+
+function resolveUrl(url: string, base: string): string {
+  try {
+    return new URL(url, base).toString();
+  } catch {
+    return "";
+  }
+}
+
+function hostOf(url: string) {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function normalizePageUrl(url: string, base: string) {
+  try {
+    const parsed = new URL(url, base);
+    parsed.hash = "";
+    return `${parsed.origin}${parsed.pathname.replace(/\/+$/, "") || "/"}${parsed.search}`;
+  } catch {
+    return url.trim();
+  }
+}
+
+function isProfilePageAction(text: string, href: string, pageUrl: string) {
+  const token = text.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  if (/\b(profile|my account|account settings|view profile|edit profile|complete your profile|your profile|mon compte|profil)\b/i.test(token)) {
+    return true;
+  }
+  try {
+    const path = new URL(href, pageUrl).pathname.toLowerCase();
+    return /\/profile\b|\/profiles\b|\/account\b|\/users\/(?:sign|edit)/i.test(path);
+  } catch {
+    return false;
+  }
+}
+
+export async function nextBrowserAction(params: {
+  pageUrl: string;
+  pageText: string;
+  stepIndex: number;
+  history: BrowserStepHistoryItem[];
+  targetApplyUrl: string;
+  targetTitle: string;
+  targetCompany: string;
+  candidateEmail: string;
+  hiddenApplyUrl?: string | null;
+  listingText: string;
+  elements: PageElement[];
+  gemini?: { apiKey: string; model?: string | null };
+}): Promise<BrowserAction> {
+  const geminiApiKey = params.gemini?.apiKey?.trim() || getGeminiApiKey()?.trim();
+
+  if (!geminiApiKey) {
+    throw new Error("Gemini API key required.");
+  }
+
+  const primaryModel = params.gemini?.model?.trim() || getGeminiModel() || GEMINI_PRIMARY_MODEL;
+  const models = Array.from(new Set([primaryModel, GEMINI_FALLBACK_MODEL, GEMINI_STABLE_FALLBACK_MODEL]));
+
+  const actions = params.elements.filter(
+    (e) => e.type === "action" && !isProfilePageAction(e.text, e.href ?? "", params.pageUrl)
+  );
+  const fields = params.elements.filter((e) => e.type === "field");
+  const validElementIds = new Set([...actions.map((e) => e.elementId), ...fields.map((e) => e.elementId)]);
+
+  const allowedUrls = new Set(
+    [
+      params.targetApplyUrl,
+      params.hiddenApplyUrl,
+      ...actions.map((a) => a.href ?? "").map((u) => resolveUrl(u, params.pageUrl))
+    ]
+      .filter(Boolean)
+      .filter((u) => !isProfilePageAction("", u, params.pageUrl)) as string[]
+  );
+
+  function compactEl(e: PageElement) {
+    const out: Record<string, unknown> = { id: e.elementId, tag: e.tag };
+    if (e.type === "action") {
+      if (e.text) out.text = e.text;
+      if (e.href) out.href = e.href;
+      if (e.context) out.ctx = e.context.slice(0, 120);
+    } else {
+      if (e.label) out.label = e.label;
+      if (e.fieldType) out.type = e.fieldType;
+      if (e.required) out.req = true;
+      if (e.options?.length) out.opts = e.options.slice(0, 12);
+    }
+    return out;
+  }
+
+  const compactActions = JSON.stringify(actions.map(compactEl));
+  const compactHistory = params.history.slice(-5).map((h) => {
+    const out: Record<string, unknown> = { t: h.tool };
+    if (h.elementId) out.el = h.elementId;
+    if (h.url) out.url = h.url;
+    if (h.reasoning) out.r = h.reasoning.slice(0, 60);
+    return out;
+  });
+
+  const prompt = [
+    "Browser agent. Goal: reach the job application form for the target job listing by clicking Apply / Apply now / Continue application buttons.",
+    "Return ONE action as JSON, no other text.",
+    '{"tool":"navigate|click|wait|blocked","elementId":null,"url":null,"reasoning":""}',
+    "Tools: navigate(url) click(elementId) wait blocked",
+    "Rules: navigation only — the extension fills forms automatically | prefer Apply / Apply now / Start application clicks | never click profile, account, dashboard, saved jobs, or settings links | on auth pages click register/sign-in only when needed to continue applying",
+    `Target job: "${params.targetTitle}" at ${params.targetCompany}`,
+    `Target listing URL: ${params.targetApplyUrl}`,
+    params.hiddenApplyUrl ? `Hidden apply URL: ${params.hiddenApplyUrl}` : "",
+    `Current page: ${params.pageUrl} | step: ${params.stepIndex}`,
+    compactHistory.length ? `History: ${JSON.stringify(compactHistory)}` : "",
+    `Allowed URLs: ${JSON.stringify([...allowedUrls])}`,
+    fields.length ? `FORM DETECTED (${fields.length} fields) — extension will fill automatically; click Apply only if this is not yet the application form` : "",
+    `PAGE:\n${params.pageText.slice(0, 2500)}`,
+    `CLICKABLE ELEMENTS:\n${compactActions}`
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const raw = await callGeminiGenerateWithKey([{ text: prompt }], geminiApiKey, models, { json: true });
+  const parsed = parseJsonObject(raw) as Partial<BrowserAction>;
+
+  const toolRaw = String(parsed.tool ?? "");
+  const validTools: BrowserTool[] = ["navigate", "click", "wait", "blocked"];
+  const tool = validTools.includes(toolRaw as BrowserTool) ? (toolRaw as BrowserTool) : "wait";
+
+  const elementIdRaw = parsed.elementId ? String(parsed.elementId) : "";
+  const elementId = validElementIds.has(elementIdRaw) ? elementIdRaw : null;
+
+  const urlRaw = parsed.url ? resolveUrl(String(parsed.url), params.pageUrl) : "";
+  const url = allowedUrls.has(urlRaw) ? urlRaw : null;
+
+  const resolvedTool: BrowserTool =
+    tool === "navigate" && !url && elementId ? "click" :
+      tool === "click" && !elementId && url ? "navigate" :
+        tool;
+
+  return {
+    tool: resolvedTool,
+    elementId,
+    url,
+    text: null,
+    value: null,
+    reasoning: String(parsed.reasoning ?? ""),
+    coverLetterElementIds: [],
+    coverLetterRevealIds: [],
+    resumeElementIds: []
+  };
 }
 
 export async function generateTailoredCoverLetterText(params: {
@@ -679,8 +939,11 @@ export async function generateTailoredCoverLetterText(params: {
   company: string;
   roleTitle: string;
   language?: AppLanguage;
+  pageLanguage?: string;
+  gemini?: { apiKey: string; model?: string | null };
 }) {
   const language = params.language ?? "en";
+  const pageLanguage = params.pageLanguage?.trim().toLowerCase() || "";
   const fallback = normalizeGeneratedPlainText(
     [
       translate("coverGreeting", undefined, language),
@@ -695,36 +958,100 @@ export async function generateTailoredCoverLetterText(params: {
       .join("\n")
   );
 
-  if (!hasGeminiKey()) {
+  const geminiApiKey = params.gemini?.apiKey?.trim() || getGeminiApiKey()?.trim();
+
+  if (!geminiApiKey) {
     return fallback;
   }
 
+  const primaryModel = params.gemini?.model?.trim() || getGeminiModel() || GEMINI_PRIMARY_MODEL;
+  const models = Array.from(new Set([primaryModel, GEMINI_FALLBACK_MODEL, GEMINI_STABLE_FALLBACK_MODEL]));
   const hasPdf = Boolean(params.resumePdf && params.resumePdf.length > 0);
+
+
   const prompt = [
-    "Write a concise, truthful cover letter tailored to this job.",
-    hasPdf
-      ? "Use only the candidate profile and the attached resume PDF. Do not invent employers, degrees, dates, or metrics."
-      : "Use only the candidate profile and existing resume text. Do not invent employers, degrees, dates, or metrics.",
-    "Use the candidate writing sample as the style reference: sentence rhythm, directness, vocabulary, and level of formality should follow that sample.",
-    "Replace the relevant experience described in this with experience the user acutally has in their work history that's relevant to this role.",
-    "If a cover letter template is provided, use it as the main structure, tone, and length reference. You may adapt wording and details for the role, but stay close to its general feel.",
-    "Do not copy placeholders from the template. Replace or omit anything that cannot be supported by the candidate profile, resume, company context, or listing.",
-    "Avoid generic AI cover-letter phrasing like 'I am excited to apply', 'I am confident I can contribute', and 'I look forward to the opportunity'.",
-    "Use plain ASCII punctuation only. Do not use em dashes, en dashes, curly quotes, bullets, special symbols, or decorative characters.",
-    "No trailing spaces. Use normal line endings and short paragraphs.",
-    "Keep it plain text, 3 to 5 short paragraphs, and ready to paste into an application form.",
-    "Address it to the hiring team unless a specific contact is provided.",
-    `Write the response in ${language === "fr" ? "French" : "English"}.`,
-    `Target role: ${params.roleTitle}`,
-    `Company: ${params.company}`,
-    `Candidate profile:\n${params.profileBlock}`,
-    !hasPdf && params.resumeText ? `Existing resume text:\n${params.resumeText}` : "",
-    params.coverLetterTemplate ? `Cover letter template for tone, structure, and length:\n${params.coverLetterTemplate.slice(0, 6000)}` : "",
-    params.writingSample ? `Candidate writing sample for style:\n${params.writingSample.slice(0, 6000)}` : "",
-    params.companyAboutText ? `Company about/context page text:\n${params.companyAboutText.slice(0, 7000)}` : "",
-    `Job listing:\n${params.listingText.slice(0, 8000)}`
+
+    "Write a short application note for this job. This is not a formal cover letter.",
+
+    "",
+
+    "Goal:",
+
+    "Sound like a real person briefly explaining why this role makes sense for them.",
+
+    "- Reference specifics from the listing if possible.",
+
+    "The note should be specific, direct, and slightly understated.",
+
+    "",
+
+    "Hard constraints:",
+
+    "- 2 to 3 short paragraphs only.",
+
+    "- 120 to 220 words total.",
+
+    "- No bullets.",
+
+    "- Plain text only.",
+
+    pageLanguage
+      ? `- Write the entire note in the same language as the job application page (BCP-47 language code: ${pageLanguage}). Do not use English unless that code is en.`
+      : `- Write the entire note in ${language === "fr" ? "French" : "English"}.`,
+
+    "- Address it to 'Hi team,' unless a specific contact is provided.",
+
+    "- Use plain ASCII punctuation only. Do not use em dashes, en dashes, curly quotes, bullets, special symbols, or decorative characters.",
+
+    "- Do not invent employers, degrees, dates, metrics, locations, titles, clients, or domain experience.",
+
+    "- Do not claim the candidate has experience unless it is explicitly supported by the profile or resume.",
+
+    "",
+
+    "Style rules:",
+
+    "- Use the candidate writing sample as the style reference.",
+
+    "- Prefer simple, concrete sentences.",
+
+    "- Avoid polished corporate language.",
+
+    "- Avoid sounding eager, inspirational, or overly impressed.",
+
+    "- Avoid generic AI cover-letter phrasing.",
+
+    "- Do not use these phrases or close variants: 'I am excited to apply', 'I am confident I can contribute', 'leverage my background', 'particularly interesting', 'core product', 'complex operations', 'dynamic team', 'fast-paced environment', 'mission-driven', 'passionate about', 'perfect fit', 'unique opportunity', 'I look forward to'.",
+
+    "",
+
+    "Content rules:",
+
+    "- Start with the actual reason the role is interesting, based on the job listing.",
+
+    "- Then connect 1 or 2 specific pieces of the candidate's real experience to the role.",
+
+    "- If the domain is new to the candidate, say it indirectly by focusing on transferable workflow/system experience. Do not pretend domain expertise.",
+
+    "- Prefer specific work patterns over broad labels.",
+
+    "- Mention the company name at most once.",
+
+    "- Mention the role title at most once.",
+
+    "- Finish with a link to my portfolio/github/public resume link, etc. if available, and a friendly invitation to follow up.",
+
+    "",
+
+    `Job listing:\n${params.listingText.slice(0, 8000)}`,
+
+    `Resume text:\n${params.resumeText ?? ""}`,
+
+    `Candidate writing sample:\n${params.writingSample ?? ""}`,
   ]
+
     .filter(Boolean)
+
     .join("\n\n");
 
   const parts: GeminiUserPart[] = [{ text: prompt }];
@@ -739,7 +1066,7 @@ export async function generateTailoredCoverLetterText(params: {
   }
 
   try {
-    const text = await callGeminiGenerate(parts);
+    const text = await callGeminiGenerateWithKey(parts, geminiApiKey, models);
     return normalizeGeneratedPlainText(text) || fallback;
   } catch {
     return fallback;
@@ -764,21 +1091,21 @@ export async function generateHiringContactEmail(params: {
   const fallbackBody = normalizeGeneratedPlainText(
     params.followUp
       ? [
-          "Hi,",
-          "",
-          translate("followUpBody", { role: params.roleTitle, company: params.company }, language),
-          "",
-          "Best,",
-          params.profileBlock.match(/^Name:\s*(.+)$/m)?.[1] ?? ""
-        ].join("\n")
+        "Hi,",
+        "",
+        translate("followUpBody", { role: params.roleTitle, company: params.company }, language),
+        "",
+        "Best,",
+        params.profileBlock.match(/^Name:\s*(.+)$/m)?.[1] ?? ""
+      ].join("\n")
       : [
-          "Hi,",
-          "",
-          translate("directApplicationBody", { role: params.roleTitle, company: params.company }, language),
-          "",
-          "Best,",
-          params.profileBlock.match(/^Name:\s*(.+)$/m)?.[1] ?? ""
-        ].join("\n")
+        "Hi,",
+        "",
+        translate("directApplicationBody", { role: params.roleTitle, company: params.company }, language),
+        "",
+        "Best,",
+        params.profileBlock.match(/^Name:\s*(.+)$/m)?.[1] ?? ""
+      ].join("\n")
   );
 
   if (!hasGeminiKey()) {

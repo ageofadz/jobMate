@@ -1,12 +1,7 @@
 import http from "node:http";
-import fs from "node:fs";
-import path from "node:path";
 
-import { getFilesDir } from "@/lib/env";
-import { getAppLanguage } from "@/lib/i18n";
-import { fetchCompanyAboutContext } from "@/lib/services/company-about";
-import { buildCoverLetterDocx } from "@/lib/services/docx";
-import { classifyApplicationFieldIntent, generateFormAnswers, generateTailoredCoverLetterText } from "@/lib/services/llm";
+import { ensureChromeApplyCoverLetter } from "@/lib/services/apply-cover-letter";
+import { nextBrowserAction, generateFormAnswers, type PageElement } from "@/lib/services/llm";
 
 type ServedUpload = {
   name: string;
@@ -27,6 +22,8 @@ export type ChromeApplyPayload = {
   writingSample: string;
   coverLetterTemplate: string;
   coverLetterText: string;
+  candidateEmail: string;
+  candidateFullName: string;
   resumeUpload: ServedUpload | null;
   coverUpload: ServedUpload | null;
   linkedinLinks: string[];
@@ -104,60 +101,35 @@ function publicPayload(entry: Entry) {
   return safe;
 }
 
-function base64(buffer: Buffer) {
-  return buffer.toString("base64");
+async function ensureCoverLetter(entry: Entry, fields: LiveField[]) {
+  await ensureChromeApplyCoverLetter(entry.payload, fields);
 }
 
-async function ensureCoverLetter(entry: Entry, fields: LiveField[]) {
-  if (entry.payload.coverUpload) {
-    return;
-  }
-
-  const intents = await Promise.all(
-    fields.map((field) =>
-      classifyApplicationFieldIntent({
-        label: field.label,
-        key: field.key,
-        type: field.type,
-        options: field.options
-      })
-    )
-  );
-
-  if (!intents.some((intent) => intent === "cover_letter_upload")) {
-    return;
-  }
-
-  const companyAboutText = await fetchCompanyAboutContext(entry.payload.companyHomepage);
-  const resumePdf = entry.payload.resumeUpload?.base64
-    ? Buffer.from(entry.payload.resumeUpload.base64, "base64")
-    : null;
-  const coverLetterText = await generateTailoredCoverLetterText({
-    profileBlock: entry.payload.contextBlock,
-    resumeText: resumePdf ? undefined : entry.payload.resumeText,
-    resumePdf,
-    listingText: entry.payload.listingText,
-    writingSample: entry.payload.writingSample,
-    coverLetterTemplate: entry.payload.coverLetterTemplate,
-    companyAboutText,
-    company: entry.payload.company,
-    roleTitle: entry.payload.title,
-    language: getAppLanguage()
-  });
-  const coverDocx = await buildCoverLetterDocx({
-    candidateName: entry.payload.contextBlock.match(/^Name:\s*(.+)$/m)?.[1]?.trim() ?? "",
-    company: entry.payload.company,
-    roleTitle: entry.payload.title,
-    body: coverLetterText
-  });
-
-  fs.writeFileSync(path.join(getFilesDir(), "cover.txt"), coverLetterText, "utf8");
-  entry.payload.coverLetterText = coverLetterText;
-  entry.payload.coverUpload = {
-    name: "cover.docx",
-    mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    base64: base64(coverDocx)
+async function handleAnalyze(entry: Entry, req: http.IncomingMessage, res: http.ServerResponse) {
+  const body = (await readJson(req)) as {
+    pageUrl?: string;
+    pageText?: string;
+    stepIndex?: number;
+    history?: Array<{ step: number; tool: string; reasoning?: string; elementId?: string | null; url?: string | null }>;
+    hiddenApplyUrl?: string | null;
+    elements?: PageElement[];
   };
+
+  const browserAction = await nextBrowserAction({
+    pageUrl: typeof body.pageUrl === "string" ? body.pageUrl : "",
+    pageText: typeof body.pageText === "string" ? body.pageText : "",
+    stepIndex: typeof body.stepIndex === "number" ? body.stepIndex : 0,
+    history: Array.isArray(body.history) ? body.history : [],
+    targetApplyUrl: entry.payload.applyUrl,
+    targetTitle: entry.payload.title,
+    targetCompany: entry.payload.company,
+    candidateEmail: entry.payload.candidateEmail,
+    hiddenApplyUrl: typeof body.hiddenApplyUrl === "string" ? body.hiddenApplyUrl : null,
+    listingText: entry.payload.listingText,
+    elements: Array.isArray(body.elements) ? body.elements : []
+  });
+
+  json(res, 200, browserAction);
 }
 
 async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
@@ -218,6 +190,11 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
       coverLetterText: entry.payload.coverLetterText,
       coverUpload: entry.payload.coverUpload
     });
+    return;
+  }
+
+  if (route === "analyze" && req.method === "POST") {
+    await handleAnalyze(entry, req, res);
     return;
   }
 

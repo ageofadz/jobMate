@@ -109,6 +109,8 @@ export type ParsedJobPage = {
   applyUrl: string;
   compensationRange?: string | null;
   companyHomepage?: string | null;
+  companyLogoUrl?: string | null;
+  postedAt?: string | null;
   linkedinLinks?: string[];
   hiringContacts?: string[];
   fields: Array<{
