@@ -1,4 +1,4 @@
-importScripts("jobmate-app-url.js", "apply-navigation.js");
+importScripts("jobmate-app-url.js", "apply-navigation.js", "apply-domain-playbook.js");
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -559,7 +559,7 @@ async function generateCoverLetterExt(config, jobData, pageLanguage) {
     "Reference specifics from the listing if possible. Be specific, direct, and slightly understated.",
     "Hard constraints: 2 to 3 short paragraphs only. 120 to 220 words total. No bullets. Plain text only.",
     lang && lang !== "en" ? `Write the entire note in the language with BCP-47 code: ${lang}. Do not use English unless that code is en.` : "Write the entire note in English.",
-    "Address it to 'Hi team,' unless a specific contact is provided.",
+    "Address it to the hiring team unless a specific contact is provided.",
     "Use plain ASCII punctuation only. No em dashes, en dashes, curly quotes, bullets, or special symbols.",
     "Do not invent employers, degrees, dates, metrics, locations, titles, clients, or domain experience.",
     "Use the candidate writing sample as the style reference.",
@@ -615,14 +615,17 @@ async function generateFormAnswersExt(tabId, fields, retryNote, pageLanguage) {
     "Read every field label literally. Do not move an answer from one field to another.",
     "For every answer, first identify what that exact field label is asking. The answer must fit that exact field label and its options.",
     "You must return exactly one answers item for every field in Fields JSON.",
-    "Every field must receive an answer. Never leave a required field empty.",
+    "Every field must receive a non-empty answer. Required and optional fields alike must be filled.",
+    "Never skip a field because it is optional. Location, visa sponsorship, work authorization, and how-you-heard questions must always be answered.",
     hasPdf
-      ? "For required fields, an empty answer is invalid. Use the candidate context and the attached resume PDF to answer them."
-      : "For required fields, an empty answer is invalid. Use the candidate context and resume to answer them.",
+      ? "Every empty answer is invalid. Use the candidate context and the attached resume PDF to answer every field."
+      : "Every empty answer is invalid. Use the candidate context and resume to answer every field.",
     hasPdf
       ? "Identity fields are mandatory: Full name must use the candidate name. Email and any confirm-email field must use the candidate email. Phone must use the candidate phone if present in context or resume PDF."
       : "Identity fields are mandatory: Full name must use the candidate name. Email and any confirm-email field must use the candidate email. Phone must use the candidate phone if present in context or resume.",
-    "If a field asks about visa sponsorship, work authorization, or legal right to work, answer truthfully from candidate context and choose the closest matching option.",
+    "If a field asks about visa sponsorship, work authorization, or legal right to work, answer truthfully from candidate context and choose the closest matching option. Never leave these empty.",
+    "If a field asks for current location, city, state, country, or address, answer from candidate context. Under 80 characters.",
+    "If a field asks how the candidate heard about the job, answer exactly 'Google'.",
     "If a field asks for a cover letter, motivation letter, letter of interest, or supporting statement, use the provided cover letter tool.",
     "If a field asks for a message to the recruitment or hiring team, what motivates the candidate, why they want to join, or why this role is their next challenge, use the provided cover letter tool.",
     "If a field is asking why the candidate would be a strong addition to the team or culture, answer as a culture-fit question focused on soft skills, not technical experience, unless the field clearly asks for a long motivation statement.",
@@ -630,12 +633,13 @@ async function generateFormAnswersExt(tabId, fields, retryNote, pageLanguage) {
     "Never return a filename, file path, or PDF name as an answer.",
     "For file-type fields: if the field is asking for a resume, CV, curriculum vitae, or equivalent, return exactly \"__resume__\". If asking for a cover letter or motivation letter, return exactly \"__cover_letter__\". For any other file field, return an empty string.",
     "Never use the cover letter text for location, source/how-heard, authorization, short answer, URL, or phone fields unless the field clearly asks for a long written statement.",
-    "If a field asks for current location/city/state, answer only the location value, for example 'Chicago, IL'. Under 80 characters.",
-    "If a field asks how the candidate heard about the job, answer exactly 'Google'.",
     "Determine the field's intent semantically from its label, key, type, and options, not by keyword matching alone.",
-    "If a field asks for a URL, answer only a URL. For LinkedIn, GitHub, personal website, Twitter/X: answer the candidate's URL for that network if present in context, otherwise leave empty.",
-    "For optional demographic/self-identification fields, choose the opt-out option when one exists; otherwise answer truthfully from context.",
-    "For required demographic/self-identification choice fields, choose the option label equivalent to 'I do not wish to answer', 'Decline to self-identify', 'Prefer not to say', or 'I don't want to answer'.",
+    "If a field asks for a URL, answer only a URL. For LinkedIn, GitHub, personal website, Twitter/X: answer the candidate's URL for that network if present in context, otherwise use the closest truthful value from context.",
+    "Only for optional demographic or equal-opportunity self-identification fields (race, ethnicity, gender, pronouns, disability, veteran status), choose the opt-out option when one exists.",
+    "Only for required demographic self-identification choice fields, choose the option equivalent to 'I do not wish to answer', 'Decline to self-identify', 'Prefer not to say', or 'I don't want to answer'.",
+    "For checkbox fields that are not demographic, answer with the option label that checks the box, usually 'Yes' or the affirmative consent option.",
+    "For multi-select checkbox groups, return every applicable option label separated by commas.",
+    "For select and dropdown fields, answer using the exact option label from that field's options list.",
     "For radio, checkbox, and select fields, answer using option labels from that field's options.",
     "For required radio, checkbox, and select fields, you must choose the best available option.",
     ...COMPENSATION_PROMPT_LINES,
@@ -671,6 +675,11 @@ async function generateFormAnswersExt(tabId, fields, retryNote, pageLanguage) {
     } else {
       answers.push({ fieldId, answer: answer === "__cover_letter__" ? "" : answer, reasoning: item.reasoning ?? "Answered from whole-form field dump." });
     }
+  }
+
+  for (const field of fields) {
+    if (answers.some((item) => item.fieldId === field.fieldId)) continue;
+    answers.push({ fieldId: field.fieldId, answer: "", reasoning: "" });
   }
 
   const covUpload = null;
@@ -725,10 +734,7 @@ async function nextBrowserActionExt(tabId, pageData) {
   const jobData = getSessionJobData(tabId);
 
   const { pageUrl, pageText, stepIndex, history, hiddenApplyUrl, elements, blockedElementIds } = pageData;
-  const blockedIds = new Set([
-    ...blockedIdsFromHistory(history),
-    ...(Array.isArray(blockedElementIds) ? blockedElementIds.map(String) : [])
-  ]);
+  const blockedIds = new Set(Array.isArray(blockedElementIds) ? blockedElementIds.map(String) : []);
 
   if (recordApplyPageUrlOscillation(tabId, pageUrl)) {
     return {
@@ -779,7 +785,7 @@ async function nextBrowserActionExt(tabId, pageData) {
           }
         };
       }
-    } catch {}
+    } catch { }
   }
 
   const allActions = (elements || []).filter((e) => e.type === "action");
@@ -811,6 +817,7 @@ async function nextBrowserActionExt(tabId, pageData) {
       if (e.text) out.text = e.text;
       if (e.href) out.href = e.href;
       if (e.context) out.ctx = String(e.context).slice(0, 120);
+      if (e.disabled) out.disabled = true;
     } else {
       if (e.label) out.label = e.label;
       if (e.fieldType) out.type = e.fieldType;
@@ -828,6 +835,75 @@ async function nextBrowserActionExt(tabId, pageData) {
     if (h.reasoning) out.r = String(h.reasoning).slice(0, 60);
     return out;
   });
+
+  const playbookAction = await lookupPlaybookAction(pageUrl, fields.length, elements, blockedIds);
+  if (playbookAction) {
+    if (playbookAction.tool === "navigate" && playbookAction.url) {
+      const resolved = resolveUrl(playbookAction.url, pageUrl);
+      if (
+        resolved &&
+        allowedUrls.has(resolved) &&
+        isAllowedNavigateUrl(resolved, pageUrl, pageHost, targetApplyUrl) &&
+        !isForbiddenNavigationUrl(resolved, pageUrl)
+      ) {
+        return {
+          ok: true,
+          action: {
+            tool: "navigate",
+            elementId: null,
+            url: resolved,
+            text: null,
+            value: null,
+            reasoning: playbookAction.reasoning,
+            fromPlaybook: true,
+            coverLetterElementIds: [],
+            coverLetterRevealIds: [],
+            resumeElementIds: []
+          }
+        };
+      }
+    } else if ((playbookAction.tool === "click" || playbookAction.tool === "submit") && playbookAction.elementId) {
+      const picked = allActions.find((e) => e.elementId === playbookAction.elementId);
+      if (
+        picked &&
+        !blockedIds.has(playbookAction.elementId) &&
+        !(picked.href && isForbiddenNavigationUrl(String(picked.href), pageUrl))
+      ) {
+        return {
+          ok: true,
+          action: {
+            tool: playbookAction.tool,
+            elementId: playbookAction.elementId,
+            url: null,
+            text: null,
+            value: null,
+            reasoning: playbookAction.reasoning,
+            fromPlaybook: true,
+            coverLetterElementIds: [],
+            coverLetterRevealIds: [],
+            resumeElementIds: []
+          }
+        };
+      }
+    }
+  }
+
+  if (!actions.length && !fields.length) {
+    return {
+      ok: true,
+      action: {
+        tool: "wait",
+        elementId: null,
+        url: null,
+        text: null,
+        value: null,
+        reasoning: "No clickable elements yet — waiting for page to finish loading.",
+        coverLetterElementIds: [],
+        coverLetterRevealIds: [],
+        resumeElementIds: []
+      }
+    };
+  }
 
   const hasApplicationForm = fields.some((f) => f.fieldType === "file" || f.fieldType === "textarea" || f.fieldType === "contenteditable") || fields.length >= 8;
 

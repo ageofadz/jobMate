@@ -244,27 +244,95 @@
   }
 
 
+  function isActionRendered(node) {
+    if (!node.isConnected) return false;
+    const rect = node.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) return false;
+    const style = window.getComputedStyle(node);
+    if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return false;
+    return true;
+  }
+
+  function actionText(node) {
+    const attrs = clean(
+      [node.getAttribute("aria-label"), node.getAttribute("title"), node.getAttribute("value"), node.getAttribute("data-testid")]
+        .filter(Boolean)
+        .join(" ")
+    );
+    if (attrs) return attrs.slice(0, 120);
+    const own = clean(
+      Array.from(node.childNodes)
+        .map((n) => {
+          if (n.nodeType === Node.TEXT_NODE) return n.textContent || "";
+          if (n.nodeType === Node.ELEMENT_NODE && n.childElementCount === 0) return n.textContent || "";
+          return "";
+        })
+        .join(" ")
+    );
+    if (own) return own.slice(0, 120);
+    return clean(node.textContent || "").slice(0, 120);
+  }
+
+  function isLikelyPointerClickable(node) {
+    if (node.closest('button, a[href], [role="button"], [role="link"], input[type="button"], input[type="submit"]')) {
+      return false;
+    }
+    const tag = node.tagName;
+    if (!["DIV", "SPAN", "LI", "P", "LABEL", "TD", "TH"].includes(tag)) return false;
+    if (!isActionRendered(node)) return false;
+    const style = window.getComputedStyle(node);
+    if (style.cursor !== "pointer") return false;
+    const rect = node.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0 || rect.width > 480 || rect.height > 120) return false;
+    const text = actionText(node);
+    return Boolean(text);
+  }
+
+  function collectActionCandidates() {
+    const selector =
+      'button, a, [role="button"], [role="tab"], [role="link"], input[type="button"], input[type="submit"], [onclick], label[for]';
+    const seen = new Set();
+    const nodes = [];
+
+    for (const root of fieldRoots()) {
+      for (const node of queryDeep(selector, root)) {
+        if (seen.has(node)) continue;
+        seen.add(node);
+        nodes.push(node);
+      }
+    }
+
+    for (const root of fieldRoots()) {
+      for (const node of queryDeep("div, span, li, p, label, td, th", root)) {
+        if (seen.has(node)) continue;
+        if (!isLikelyPointerClickable(node)) continue;
+        seen.add(node);
+        nodes.push(node);
+      }
+    }
+
+    return nodes.filter((node) => !nodes.some((other) => other !== node && node.contains(other)));
+  }
+
   function collectPageElements(hiddenApplyUrl) {
     elementRegistry = new Map();
     elemSeq = 0;
     const elements = [];
 
-    const actionNodes = Array.from(
-      document.querySelectorAll('button, a[href], [role="button"], [role="tab"], input[type="button"], input[type="submit"]')
-    );
+    for (const node of collectActionCandidates()) {
+      if (!isActionRendered(node)) continue;
+      if (node.tagName === "A") {
+        const hrefAttr = node.getAttribute("href") || "";
+        if (hrefAttr.startsWith("javascript:") && !node.getAttribute("onclick") && node.getAttribute("role") !== "button") {
+          continue;
+        }
+      }
 
-    for (const node of actionNodes) {
-      const text = clean(
-        [node.textContent || "", node.getAttribute("aria-label") || "", node.getAttribute("data-testid") || "", node.getAttribute("title") || ""].join(" ")
-      );
-      if (!text || text.length > 200) continue;
+      const text = actionText(node);
+      if (!text) continue;
 
       let href = resolveHref(node) || "";
       if (href && isForbiddenNavigationUrl(href, location.href)) continue;
-      if (!href && hiddenApplyUrl) {
-        const parentText = clean(node.closest("section, article, main, form, div")?.textContent || "");
-        if (parentText.length > 5) href = "";
-      }
 
       const elementId = `el_${elemSeq++}`;
       node.dataset.jobmateElementId = elementId;
@@ -277,6 +345,7 @@
         tag: node.tagName.toLowerCase(),
         text,
         href,
+        disabled: Boolean(node.disabled || node.getAttribute("aria-disabled") === "true"),
         context: clean(card?.textContent || "").slice(0, 300)
       });
     }
@@ -435,7 +504,7 @@
         const type = tag === "input" ? String(node.type || "text").toLowerCase() : tag;
         if (["hidden", "button", "submit", "reset", "image", "search"].includes(type)) continue;
         if (node.closest('[role="search"], search')) continue;
-        if (!isRendered(node)) continue;
+        if (type !== "file" && !isRendered(node)) continue;
         pushField(node, type, tag);
       }
     }
@@ -530,26 +599,99 @@
     }
   }
 
+  function isDemographicField(field) {
+    return demographicPattern.test(field.label);
+  }
+
+  function optionMatches(wantedParts, label, value) {
+    const lab = norm(`${label} ${value}`);
+    for (const part of wantedParts) {
+      if (!part) continue;
+      if (lab === part || lab.includes(part) || part.includes(lab)) return true;
+      if (part === "yes" && /\b(yes|true|agree|accept|accepted|authorized|eligible|confirm|consent)\b/.test(lab)) {
+        return true;
+      }
+      if (part === "no" && /\b(no|false|not eligible|without|decline|do not|don't)\b/.test(lab)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function fieldLooksEmpty(item) {
+    const node = item.node;
+    const type = item.field.type;
+    if (type === "file") return false;
+    if (type === "checkbox") return !node.checked;
+    if (type === "radio") {
+      const name = node.getAttribute("name");
+      const group = name
+        ? Array.from(document.querySelectorAll(`input[type="radio"][name="${CSS.escape(name)}"]`))
+        : [node];
+      return !group.some((entry) => entry.checked);
+    }
+    if (node.tagName === "SELECT") {
+      const value = String(node.value || "").trim();
+      if (!value) return true;
+      const selected = node.selectedOptions?.[0];
+      const label = norm(selected?.label || selected?.text || value);
+      return !label || label === "select" || label === "choose" || label === "please select";
+    }
+    if (type === "contenteditable") return !clean(node.textContent || "");
+    return !String(node.value ?? "").trim();
+  }
+
   function choose(node, answer, multi) {
     const name = node.getAttribute("name");
     const group = name
       ? Array.from(document.querySelectorAll(`input[type="${node.type}"][name="${CSS.escape(name)}"]`))
       : [node];
-    const wanted = answer.split(/[\n,;]/).map(norm).filter(Boolean);
+    const wanted = answer.split(/[\n,;|]/).map(norm).filter(Boolean);
     for (const item of group) {
-      const label = norm(`${labelledText(item)} ${item.value}`);
-      const match = wanted.some((part) => label.includes(part) || part.includes(label));
+      const label = labelledText(item);
+      const match = optionMatches(wanted, label, item.value);
       if (match) {
         item.focus();
-        item.click();
+        if (!item.checked) item.click();
+        item.checked = true;
+        item.dispatchEvent(new Event("input", { bubbles: true }));
         item.dispatchEvent(new Event("change", { bubbles: true }));
         if (!multi) return;
       }
     }
   }
 
+  function fillSelect(node, answer) {
+    const target = norm(answer);
+    let picked = null;
+    for (const opt of node.options) {
+      const labels = [opt.label, opt.text, opt.value].map(norm).filter(Boolean);
+      if (labels.some((label) => label === target || label.includes(target) || target.includes(label))) {
+        picked = opt;
+        break;
+      }
+    }
+    node.focus();
+    node.value = picked?.value || answer;
+    node.dispatchEvent(new Event("input", { bubbles: true }));
+    node.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  async function checkNonDemographicCheckboxes(fieldItems) {
+    for (const item of fieldItems) {
+      if (item.field.type !== "checkbox") continue;
+      if (isDemographicField(item.field)) continue;
+      if (item.node.checked) continue;
+      item.node.focus();
+      await aggressiveClick(item.node);
+      item.node.checked = true;
+      item.node.dispatchEvent(new Event("input", { bubbles: true }));
+      item.node.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+  }
+
   function optOutAnswer(field) {
-    if (!field.required || !["radio", "checkbox", "select"].includes(field.type) || !demographicPattern.test(field.label)) {
+    if (!field.required || !["radio", "checkbox", "select"].includes(field.type) || !isDemographicField(field)) {
       return "";
     }
     return field.options.find((option) => optOutPattern.test(option)) || "";
@@ -593,19 +735,93 @@
 
     for (const root of fieldRoots()) {
       for (const node of queryDeep('input[type="file"]', root)) {
-        if (!seen.has(node)) {
-          seen.add(node);
-          inputs.push(node);
-        }
+        if (seen.has(node)) continue;
+        seen.add(node);
+        inputs.push(node);
       }
     }
 
     return inputs;
   }
 
+  function syncFileFieldItems(fieldItems) {
+    const items = [...fieldItems];
+    const known = new Set(fieldItems.map((item) => item.node));
+    let fieldSeq = fieldItems.length;
+
+    for (const input of collectAllFileInputs()) {
+      if (known.has(input)) continue;
+      const nameAttr = input.getAttribute("name") || "";
+      const idAttr = input.id || "";
+      const key = nameAttr || idAttr || `file_${fieldSeq}`;
+      const fieldId = input.dataset.jobmateFieldId || `jm_${fieldSeq}_${key.replace(/[^a-zA-Z0-9_-]+/g, "_").slice(0, 60)}`;
+      fieldSeq += 1;
+      input.dataset.jobmateFieldId = fieldId;
+      items.push({
+        node: input,
+        field: {
+          fieldId,
+          key,
+          label: nearbyLabel(input),
+          type: "file",
+          required:
+            input.required === true ||
+            String(input.getAttribute("aria-required") || "") === "true" ||
+            /[✱*]|required/i.test(nearbyLabel(input)),
+          options: []
+        }
+      });
+    }
+
+    return items;
+  }
+
+  function collectResumeInputs(fieldItems) {
+    const coverLetterIds = new Set(classifyCoverLetterFileFields(fieldItems));
+    const targets = [];
+
+    for (const input of collectAllFileInputs()) {
+      const item = fieldItems.find((entry) => entry.node === input);
+      if (item && coverLetterIds.has(item.field.fieldId)) continue;
+      if (isCoverLetterFileInput(input)) continue;
+
+      const label = item?.field.label || nearbyLabel(input);
+      if (isResumeLabel(label)) {
+        targets.push(input);
+        continue;
+      }
+
+      const accept = String(input.getAttribute("accept") || "").toLowerCase();
+      if (accept.includes("pdf") || accept.includes("doc") || accept.includes("msword") || accept.includes("word")) {
+        targets.push(input);
+      }
+    }
+
+    if (!targets.length) {
+      for (const input of collectAllFileInputs()) {
+        const item = fieldItems.find((entry) => entry.node === input);
+        if (item && coverLetterIds.has(item.field.fieldId)) continue;
+        if (isCoverLetterFileInput(input)) continue;
+        targets.push(input);
+      }
+    }
+
+    return [...new Set(targets)];
+  }
+
   function fileInputHasResume(input) {
     const files = input.files;
     return Boolean(files && files.length > 0);
+  }
+
+  function resumeUploadLooksComplete(input, payload) {
+    if (fileInputHasResume(input)) return true;
+    const section = input.closest("section, fieldset, form, li, article, div, label") || input.parentElement;
+    const text = clean(section?.textContent || "").slice(0, 800).toLowerCase();
+    const uploadName = String(payload?.resumeUpload?.name || "").trim().toLowerCase();
+    if (uploadName && text.includes(uploadName)) return true;
+    if (text.includes(".pdf") && isResumeLabel(nearbyLabel(input))) return true;
+    return false;
   }
 
   function setInputFiles(input, fileList) {
@@ -622,25 +838,108 @@
   async function forceAttachResumeToInput(input, file) {
     input.scrollIntoView({ block: "center", inline: "center" });
 
-    const transfer = new DataTransfer();
-    transfer.items.add(file);
-    const fileList = transfer.files;
+    const saved = {
+      type: input.type,
+      hidden: input.hidden,
+      disabled: input.disabled,
+      style: {
+        display: input.style.display,
+        visibility: input.style.visibility,
+        opacity: input.style.opacity,
+        position: input.style.position,
+        width: input.style.width,
+        height: input.style.height,
+        left: input.style.left,
+        top: input.style.top,
+        pointerEvents: input.style.pointerEvents
+      },
+      attrs: {
+        hidden: input.getAttribute("hidden"),
+        ariaHidden: input.getAttribute("aria-hidden"),
+        tabIndex: input.getAttribute("tabindex")
+      }
+    };
+
+    function restoreInput() {
+      input.type = saved.type;
+      input.hidden = saved.hidden;
+      input.disabled = saved.disabled;
+      for (const [key, value] of Object.entries(saved.style)) {
+        input.style[key] = value;
+      }
+      if (saved.attrs.hidden === null) input.removeAttribute("hidden");
+      else input.setAttribute("hidden", saved.attrs.hidden);
+      if (saved.attrs.ariaHidden === null) input.removeAttribute("aria-hidden");
+      else input.setAttribute("aria-hidden", saved.attrs.ariaHidden);
+      if (saved.attrs.tabIndex === null) input.removeAttribute("tabindex");
+      else input.setAttribute("tabindex", saved.attrs.tabIndex);
+    }
+
+    function prepareInput() {
+      if (input.type !== "file") input.type = "file";
+      input.hidden = false;
+      input.disabled = false;
+      input.removeAttribute("hidden");
+      input.removeAttribute("aria-hidden");
+      input.style.display = "block";
+      input.style.visibility = "visible";
+      input.style.opacity = "0.01";
+      input.style.position = "fixed";
+      input.style.left = "0";
+      input.style.top = "0";
+      input.style.width = "4px";
+      input.style.height = "4px";
+      input.style.pointerEvents = "auto";
+      input.tabIndex = 0;
+    }
+
+    function dispatchFileEvents(target) {
+      target.dispatchEvent(new Event("focus", { bubbles: true }));
+      target.dispatchEvent(new Event("input", { bubbles: true }));
+      target.dispatchEvent(new Event("change", { bubbles: true }));
+      target.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true }));
+      target.dispatchEvent(new Event("blur", { bubbles: true }));
+    }
+
+    async function assignFiles(target) {
+      const transfer = new DataTransfer();
+      transfer.items.add(file);
+      setInputFiles(target, transfer.files);
+      dispatchFileEvents(target);
+    }
+
+    async function tryDrop(target) {
+      const transfer = new DataTransfer();
+      transfer.items.add(file);
+      const zone = target.closest(
+        "label, [role='button'], button, [class*='upload'], [class*='drop'], [class*='file'], [class*='File'], form, section, div"
+      ) || target;
+      zone.dispatchEvent(new DragEvent("dragenter", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+      zone.dispatchEvent(new DragEvent("dragover", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+      zone.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+      await assignFiles(target);
+    }
 
     const attempts = [
       async () => {
-        setInputFiles(input, fileList);
+        prepareInput();
+        input.focus();
+        await assignFiles(input);
       },
       async () => {
+        prepareInput();
         const zone = input.closest(
           "label, [role='button'], button, [class*='upload'], [class*='drop'], [class*='file'], [class*='File']"
         );
         if (zone && zone !== input) {
           await aggressiveClick(zone);
-          await sleep(120);
+          await sleep(150);
         }
-        setInputFiles(input, fileList);
+        input.focus();
+        await assignFiles(input);
       },
       async () => {
+        prepareInput();
         const id = input.getAttribute("id");
         if (id) {
           const root = input.getRootNode();
@@ -648,25 +947,36 @@
           const label = scope.querySelector?.(`label[for="${CSS.escape(id)}"]`);
           if (label) {
             await aggressiveClick(label);
-            await sleep(120);
+            await sleep(150);
           }
         }
-        setInputFiles(input, fileList);
+        input.focus();
+        await assignFiles(input);
+      },
+      async () => {
+        prepareInput();
+        await tryDrop(input);
+      },
+      async () => {
+        prepareInput();
+        await aggressiveClick(input);
+        await sleep(120);
+        await assignFiles(input);
       }
     ];
 
-    for (const attempt of attempts) {
-      await attempt();
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-      input.dispatchEvent(new Event("change", { bubbles: true }));
-      input.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true }));
-      await sleep(80);
-      if (fileInputHasResume(input)) {
-        return true;
+    try {
+      for (const attempt of attempts) {
+        await attempt();
+        await sleep(120);
+        if (fileInputHasResume(input)) {
+          return true;
+        }
       }
+      return fileInputHasResume(input);
+    } finally {
+      restoreInput();
     }
-
-    return fileInputHasResume(input);
   }
 
   async function verifyRunner(payloadUrl) {
@@ -810,40 +1120,36 @@
     return new File([text], "cover-letter.txt", { type: "text/plain" });
   }
 
-  async function attachFiles(fileInputs, payload, resumeElementIds, coverLetterFileIds, uploadCoverAsFile) {
+  async function waitForResumeAttached(input, payload, maxMs = 8000) {
+    const deadline = Date.now() + maxMs;
+    let stable = 0;
+    while (Date.now() < deadline) {
+      if (!fileInputHasResume(input) && !resumeUploadLooksComplete(input, payload)) {
+        stable = 0;
+        await sleep(250);
+        continue;
+      }
+      stable += 1;
+      if (stable >= 5) return true;
+      await sleep(300);
+    }
+    return fileInputHasResume(input) || resumeUploadLooksComplete(input, payload);
+  }
+
+  async function attachResumeFiles(resumeInputs, payload) {
     const resume = payload.resumeUpload ? base64ToFile(payload.resumeUpload) : null;
-    const coverFile = uploadCoverAsFile ? coverLetterUploadFile(payload) : null;
-    const resumeSet = new Set(resumeElementIds || []);
-    const coverSet = new Set(coverLetterFileIds || []);
-    const resumeTargets = [];
+    if (!resume) return [];
     const failedResume = [];
 
-    for (const input of fileInputs) {
-      const fieldId = input.dataset.jobmateFieldId || "";
-
-      if (isCoverLetterFileInput(input)) {
-        if (!uploadCoverAsFile || !coverFile || !coverSet.has(fieldId)) continue;
-        const transfer = new DataTransfer();
-        transfer.items.add(coverFile);
-        setInputFiles(input, transfer.files);
-        input.dispatchEvent(new Event("input", { bubbles: true }));
-        input.dispatchEvent(new Event("change", { bubbles: true }));
-        continue;
-      }
-
-      if (!resumeSet.has(fieldId)) continue;
-      if (!resume) {
-        failedResume.push(nearbyLabel(input) || fieldId || "resume");
-        continue;
-      }
-
-      resumeTargets.push(input);
-    }
-
-    for (const input of resumeTargets) {
+    for (const input of resumeInputs) {
+      if (fileInputHasResume(input) || resumeUploadLooksComplete(input, payload)) continue;
       const label = nearbyLabel(input) || input.getAttribute("name") || "resume";
-      const ok = await forceAttachResumeToInput(input, resume);
+      let ok = await forceAttachResumeToInput(input, resume);
       if (!ok) {
+        await sleep(400);
+        ok = await forceAttachResumeToInput(input, resume);
+      }
+      if (!ok || !(await waitForResumeAttached(input, payload))) {
         failedResume.push(label);
       }
     }
@@ -854,13 +1160,54 @@
         "Please attach your resume/CV manually, then click Continue."
       );
     }
+
+    return failedResume;
+  }
+
+  async function attachAllResumeFiles(fieldItems, payload) {
+    if (!payload.resumeUpload?.base64) {
+      throw new Error("Application form requires a resume upload but no resume is on file.");
+    }
+    const resumeInputs = collectResumeInputs(fieldItems);
+    if (!resumeInputs.length) return [];
+    panel(["JobMate", `Attaching resume to ${resumeInputs.length} field(s)…`]);
+    return attachResumeFiles(resumeInputs, payload);
+  }
+
+  async function attachCoverLetterFiles(fileInputs, payload, coverLetterFileIds, uploadCoverAsFile) {
+    const coverFile = uploadCoverAsFile ? coverLetterUploadFile(payload) : null;
+    const coverSet = new Set(coverLetterFileIds || []);
+
+    for (const input of fileInputs) {
+      const fieldId = input.dataset.jobmateFieldId || "";
+      if (!isCoverLetterFileInput(input)) continue;
+      if (!uploadCoverAsFile || !coverFile || !coverSet.has(fieldId)) continue;
+      const transfer = new DataTransfer();
+      transfer.items.add(coverFile);
+      setInputFiles(input, transfer.files);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    }
   }
 
   async function fillControl(item, answer, fast) {
     const node = item.node;
     const type = item.field.type;
     const tag = node.tagName.toLowerCase();
-    if (!answer || type === "file") return;
+    if (type === "file") return;
+
+    if (type === "checkbox" && !answer && !isDemographicField(item.field)) {
+      if (!node.checked) {
+        node.focus();
+        await aggressiveClick(node);
+        node.checked = true;
+        node.dispatchEvent(new Event("input", { bubbles: true }));
+        node.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      return;
+    }
+
+    if (!answer) return;
 
     if (type === "contenteditable") {
       node.focus();
@@ -873,17 +1220,57 @@
     if (type === "radio" || type === "checkbox") {
       choose(node, answer, type === "checkbox");
     } else if (tag === "select") {
-      const value = Array.from(node.options).find(
-        (opt) => norm(opt.label || opt.text || opt.value) === norm(answer)
-      );
-      node.value = value?.value || answer;
-      node.dispatchEvent(new Event("change", { bubbles: true }));
+      fillSelect(node, answer);
     } else if (fast) {
       node.focus();
       setNativeValue(node, answer);
     } else {
       await typeText(node, answer);
     }
+  }
+
+  async function fillApplicationFieldItems(fieldItems, answers, payload) {
+    for (const item of fieldItems) {
+      if (item.field.type === "file") continue;
+
+      let answer = answers.get(item.field.fieldId) || "";
+      if (isCoverLetterTextField(item) && payload.coverLetterText) {
+        answer = payload.coverLetterText;
+      }
+      if (isCoverLetterTextField(item) && looksLikeFilename(answer)) {
+        answer = payload.coverLetterText || "";
+      }
+      await fillControl(item, answer, true);
+    }
+    await checkNonDemographicCheckboxes(fieldItems);
+  }
+
+  function unresolvedFieldItems(fieldItems) {
+    return fieldItems.filter((item) => item.field.type !== "file" && fieldLooksEmpty(item));
+  }
+
+  async function retryEmptyApplicationFields(fieldItems, payload, pageLanguage) {
+    const emptyItems = unresolvedFieldItems(fieldItems);
+    if (!emptyItems.length) return;
+
+    panel(["JobMate", `Retrying ${emptyItems.length} empty field(s)…`]);
+    const retryPayload = await extensionMessage({
+      type: "JOBMATE_FILL_ANSWERS",
+      fields: emptyItems.map((item) => item.field),
+      pageLanguage,
+      retryNote:
+        "These fields are still empty on the page. You MUST provide a non-empty answer for every field listed. Fill location, visa sponsorship, work authorization, source/how-heard, dropdowns, and checkbox consent fields. Use candidate context and the resume PDF."
+    }).catch(() => null);
+
+    if (!retryPayload?.ok) return new Map();
+
+    const retryAnswers = new Map((retryPayload.answers || []).map((item) => [item.fieldId, item.answer || ""]));
+    for (const item of emptyItems) {
+      const answer = retryAnswers.get(item.field.fieldId) || "";
+      if (answer) await fillControl(item, answer, true);
+    }
+    await checkNonDemographicCheckboxes(fieldItems);
+    return retryAnswers;
   }
 
   function classifyResumeAttachmentFields(fieldItems, llmResumeFieldIds) {
@@ -899,12 +1286,25 @@
   }
 
   async function fillApplicationForm(payload) {
+    let fieldItems = syncFileFieldItems(controls());
+    const resumeInputs = collectResumeInputs(fieldItems);
+    if (resumeInputs.length > 0) {
+      await attachAllResumeFiles(fieldItems, payload);
+    }
+
     panel(["JobMate", "Opening cover letter text entry…"]);
     const manualReveal = await revealCoverLetterManualEntry();
-    const fieldItems = controls();
+    fieldItems = syncFileFieldItems(controls());
     const coverLetterFileIds = classifyCoverLetterFileFields(fieldItems);
     const uploadCoverAsFile =
       coverLetterFileIds.length > 0 && (!manualReveal || !hasCoverLetterTextField(fieldItems));
+
+    const pendingResume = collectResumeInputs(fieldItems).filter(
+      (input) => !fileInputHasResume(input) && !resumeUploadLooksComplete(input, payload)
+    );
+    if (pendingResume.length > 0) {
+      await attachAllResumeFiles(fieldItems, payload);
+    }
 
     panel(["JobMate", `Generating answers for ${fieldItems.length} fields…`]);
     const answersPayload = await extensionMessage({
@@ -914,7 +1314,22 @@
     });
     if (!answersPayload?.ok) throw new Error(answersPayload?.error || "Answers generation failed.");
 
-    const resumeElementIds = classifyResumeAttachmentFields(fieldItems, answersPayload.resumeFieldIds || []);
+    const llmResumeIds = classifyResumeAttachmentFields(fieldItems, answersPayload.resumeFieldIds || []);
+    const llmResumeInputs = fieldItems
+      .filter((item) => llmResumeIds.includes(item.field.fieldId))
+      .map((item) => item.node)
+      .filter((input) => input && !fileInputHasResume(input) && !resumeUploadLooksComplete(input, payload));
+    if (llmResumeInputs.length > 0) {
+      await attachResumeFiles(llmResumeInputs, payload);
+    }
+
+    const stillPending = collectResumeInputs(fieldItems).filter(
+      (input) => !fileInputHasResume(input) && !resumeUploadLooksComplete(input, payload)
+    );
+    if (stillPending.length > 0) {
+      await attachAllResumeFiles(fieldItems, payload);
+    }
+
     const answers = new Map((answersPayload.answers || []).map((item) => [item.fieldId, item.answer || ""]));
 
     for (const item of fieldItems) {
@@ -927,60 +1342,37 @@
 
     payload.coverLetterText = answersPayload.coverLetterText || payload.coverLetterText || "";
 
-    panel(["JobMate", `Filling ${fieldItems.length} fields…`]);
-    for (const item of fieldItems) {
-      if (item.field.type === "file") continue;
-
-      let answer = answers.get(item.field.fieldId) || "";
-      if (isCoverLetterTextField(item) && payload.coverLetterText) {
-        answer = payload.coverLetterText;
-      }
-      if (isCoverLetterTextField(item) && looksLikeFilename(answer)) {
-        answer = payload.coverLetterText || "";
-      }
-      await fillControl(item, answer, true);
+    const resumeBeforeFill = collectResumeInputs(fieldItems).filter(
+      (input) => !fileInputHasResume(input) && !resumeUploadLooksComplete(input, payload)
+    );
+    if (resumeBeforeFill.length > 0) {
+      await attachAllResumeFiles(fieldItems, payload);
     }
 
-    const skippedItems = fieldItems.filter((item) => {
-      if (item.field.type === "file") return false;
-      if (isCoverLetterTextField(item)) return false;
-      const answer = answers.get(item.field.fieldId) || "";
-      if (answer) return false;
-      const val = item.node.value !== undefined ? String(item.node.value || "").trim() : "";
-      if (val) return false;
-      return true;
-    });
+    panel(["JobMate", `Filling ${fieldItems.length} fields…`]);
+    await fillApplicationFieldItems(fieldItems, answers, payload);
 
-    if (skippedItems.length > 0) {
-      panel(["JobMate", `Retrying ${skippedItems.length} empty field(s)…`]);
-      const retryPayload = await extensionMessage({
-        type: "JOBMATE_FILL_ANSWERS",
-        fields: skippedItems.map((item) => item.field),
-        pageLanguage: detectPageLanguage(),
-        retryNote: `These fields were left empty in the first pass. You MUST provide a non-empty answer for every field listed. Use every piece of candidate context available, including the resume PDF. Leaving any field empty is not permitted.`
-      }).catch(() => null);
-
-      if (retryPayload?.ok) {
-        const retryAnswers = new Map((retryPayload.answers || []).map((item) => [item.fieldId, item.answer || ""]));
-        for (const item of skippedItems) {
-          const answer = retryAnswers.get(item.field.fieldId) || "";
-          if (answer) await fillControl(item, answer, true);
-        }
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const emptyItems = unresolvedFieldItems(fieldItems);
+      if (!emptyItems.length) break;
+      const retryAnswers = await retryEmptyApplicationFields(fieldItems, payload, detectPageLanguage());
+      for (const [fieldId, answer] of retryAnswers.entries()) {
+        if (answer) answers.set(fieldId, answer);
       }
+    }
+
+    await checkNonDemographicCheckboxes(fieldItems);
+
+    if (unresolvedFieldItems(fieldItems).length > 0) {
+      await retryEmptyApplicationFields(fieldItems, payload, detectPageLanguage());
+      await checkNonDemographicCheckboxes(fieldItems);
     }
 
     if (!payload.coverLetterText?.trim() && (coverLetterFileIds.length > 0 || hasCoverLetterTextField(fieldItems))) {
       throw new Error("Application form requires a cover letter but none was generated.");
     }
 
-    const fileInputs = collectAllFileInputs();
-    const resumeRequired = resumeElementIds.length > 0;
-
-    if (resumeRequired && !payload.resumeUpload?.base64) {
-      throw new Error("Application form requires a resume upload but no resume is on file.");
-    }
-
-    await attachFiles(fileInputs, payload, resumeElementIds, coverLetterFileIds, uploadCoverAsFile);
+    await attachCoverLetterFiles(collectAllFileInputs(), payload, coverLetterFileIds, uploadCoverAsFile);
   }
 
   async function fillAuthForm(payload, fieldItems, elements) {
@@ -1186,6 +1578,24 @@
 
   function pageStateKey(fieldCount) {
     return normalizeHref(location.href) + "|f" + fieldCount;
+  }
+
+  async function rememberPlaybookStep(pageUrl, fieldCount, action, elements) {
+    if (action.tool === "navigate" && action.url) {
+      await recordPlaybookStep(pageUrl, fieldCount, "navigate", null, action.url);
+      return;
+    }
+    if (action.tool !== "click" && action.tool !== "submit") return;
+    const elemEntry = elements.find((e) => e.elementId === action.elementId);
+    if (!elemEntry) return;
+    await recordPlaybookStep(pageUrl, fieldCount, action.tool, elemEntry);
+  }
+
+  async function rememberPlaybookIfAdvanced(stateBefore, pageUrl, fieldCount, action, elements) {
+    await sleep(400);
+    const { fieldItems: fieldsAfter } = collectPageElements(null);
+    if (pageStateKey(fieldsAfter.length) === stateBefore) return;
+    await rememberPlaybookStep(pageUrl, fieldCount, action, elements);
   }
 
   async function requestHumanHelp(whatHappened, instruction) {
@@ -1401,8 +1811,17 @@
         } catch {}
       }
 
-      const hiddenApplyUrl = extractHiddenApplyUrl();
-      const { elements, fieldItems } = collectPageElements(hiddenApplyUrl);
+      let hiddenApplyUrl = extractHiddenApplyUrl();
+      let { elements, fieldItems } = collectPageElements(hiddenApplyUrl);
+      window.scrollTo(0, document.body.scrollHeight);
+      await sleep(350);
+      window.scrollTo(0, 0);
+      await sleep(200);
+      const rescanned = collectPageElements(hiddenApplyUrl);
+      if (rescanned.elements.length > elements.length) {
+        elements = rescanned.elements;
+        fieldItems = rescanned.fieldItems;
+      }
       const stateBefore = pageStateKey(fieldItems.length);
       const formKey = stateBefore;
 
@@ -1435,8 +1854,13 @@
         }
       }
 
+      const pageUrlBefore = location.href;
+      const fieldCountBefore = fieldItems.length;
       panel([`JobMate · step ${step + 1}/${MAX_STEPS}`, "Navigating…"]);
       const action = await callStep(step, history, hiddenApplyUrl, elements, blockedElementIds);
+      if (action.fromPlaybook) {
+        panel([`JobMate · step ${step + 1}/${MAX_STEPS}`, "Known path…"]);
+      }
       const histEntry = {
         step,
         tool: action.tool,
@@ -1473,6 +1897,7 @@
           continue;
         }
         statusPanel(step, MAX_STEPS, action);
+        await rememberPlaybookStep(pageUrlBefore, fieldCountBefore, action, elements).catch(() => {});
         if (navigateNow(action.url)) return;
         history.push({ ...histEntry, reasoning: "already on target page" });
         await checkStuck(stateBefore, "Please navigate or complete this step manually, then click Continue.");
@@ -1490,10 +1915,14 @@
 
       if (action.tool === "click" && action.elementId) {
         const ok = await activateElement(payloadUrl, action.elementId, elements, { step, maxSteps: MAX_STEPS, action });
-        if (ok === "navigated") return;
+        if (ok === "navigated") {
+          await rememberPlaybookStep(pageUrlBefore, fieldCountBefore, action, elements).catch(() => {});
+          return;
+        }
         history.push(histEntry);
         if (ok) {
           failuresByState.delete(stateBefore);
+          await rememberPlaybookIfAdvanced(stateBefore, pageUrlBefore, fieldCountBefore, action, elements).catch(() => {});
         } else {
           blockedElementIds.add(action.elementId);
         }

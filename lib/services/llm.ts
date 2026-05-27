@@ -999,7 +999,7 @@ export async function generateTailoredCoverLetterText(params: {
       ? `- Write the entire note in the same language as the job application page (BCP-47 language code: ${pageLanguage}). Do not use English unless that code is en.`
       : `- Write the entire note in ${language === "fr" ? "French" : "English"}.`,
 
-    "- Address it to 'Hi team,' unless a specific contact is provided.",
+    "- Address it to the hiring team unless a specific contact is provided.",
 
     "- Use plain ASCII punctuation only. Do not use em dashes, en dashes, curly quotes, bullets, special symbols, or decorative characters.",
 

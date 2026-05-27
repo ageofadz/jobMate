@@ -54,14 +54,3 @@ function isAllowedNavigateUrl(url, baseUrl, pageHost, targetApplyUrl) {
     return false;
   }
 }
-
-function blockedIdsFromHistory(history) {
-  const blocked = new Set();
-  for (const entry of history || []) {
-    if (entry.tool === "click" && entry.elementId) {
-      blocked.add(entry.elementId);
-    }
-  }
-  return blocked;
-}
-
