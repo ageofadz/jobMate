@@ -168,68 +168,20 @@
       || (node.querySelector("a[href]") ? hrefFrom(node.querySelector("a[href]")) : null);
   }
 
-  function isProfileAction(text, href) {
-    const token = norm(text);
-    if (/\b(profile|my account|account settings|view profile|edit profile|complete your profile|your profile|mon compte|profil)\b/i.test(token)) {
-      return true;
-    }
+
+  function pageHostName() {
     try {
-      const path = new URL(href, location.href).pathname.toLowerCase();
-      return /\/profile\b|\/profiles\b|\/account\b|\/users\/(?:sign|edit)/i.test(path);
+      return location.hostname.replace(/^www\./i, "").toLowerCase();
     } catch {
-      return false;
+      return "";
     }
-  }
-
-  function applyActionScore(element, node) {
-    const text = clean(element.text || "");
-    const token = norm(text);
-    const href = element.href || resolveHref(node) || "";
-
-    if (!token || text.length > 80) return -999;
-    if (isProfileAction(text, href)) return -999;
-    if (/\b(save|saved|bookmark|share|login|log in|sign in|sign up|cookie|privacy|cancel|close|view listing|view job|back|home|menu|mon compte)\b/i.test(token)) {
-      return -999;
-    }
-
-    let score = 0;
-    if (/^apply now$/i.test(text.trim())) score += 120;
-    else if (/^apply$/i.test(text.trim())) score += 110;
-    else if (/^apply\b/i.test(token)) score += 95;
-    else if (/\bapply now\b/i.test(token)) score += 90;
-    else if (/\bapply for\b/i.test(token)) score += 85;
-    else if (/\bapply\b/i.test(token)) score += 75;
-    else if (/\b(start application|submit application|continue application)\b/i.test(token)) score += 50;
-
-    if (element.tag === "button" || element.tag === "input") score += 15;
-    if (/\b(btn|button|primary|cta)\b/i.test(String(node.className || ""))) score += 10;
-
-    const rect = node.getBoundingClientRect?.();
-    if (rect && rect.width * rect.height > 5000) score += 8;
-
-    return score;
-  }
-
-  function findPrimaryApplyAction(elements) {
-    let best = null;
-    let bestScore = 0;
-
-    for (const element of elements) {
-      if (element.type !== "action") continue;
-      const node = nodeByElementId(element.elementId);
-      if (!node) continue;
-      const score = applyActionScore(element, node);
-      if (score >= 75 && score > bestScore) {
-        bestScore = score;
-        best = element;
-      }
-    }
-
-    return best;
   }
 
   function navigateNow(href) {
     if (!href || normalizeHref(href) === normalizeHref(location.href)) {
+      return false;
+    }
+    if (isForbiddenNavigationUrl(href, location.href)) {
       return false;
     }
     location.assign(href);
@@ -241,7 +193,11 @@
     if (!node) return false;
 
     const elemEntry = elements.find((e) => e.elementId === elementId);
+    const elemHref = elemEntry?.href || resolveHref(node) || "";
     const elemText = elemEntry?.text || clean(node.textContent || "");
+    if (elemHref && isForbiddenNavigationUrl(elemHref, location.href)) {
+      return false;
+    }
     statusPanel(actionMeta.step, actionMeta.maxSteps, {
       ...actionMeta.action,
       elementId: `${elementId} "${elemText.slice(0, 40)}"`
@@ -267,17 +223,23 @@
   }
 
   async function waitForPageLoad() {
-    const deadline = Date.now() + 12000;
+    const deadline = Date.now() + 15000;
     while (document.readyState !== "complete" && Date.now() < deadline) {
       await sleep(200);
     }
     let lastHtml = document.body?.innerHTML?.length ?? 0;
     let stable = 0;
-    while (stable < 3 && Date.now() < deadline) {
-      await sleep(300);
+    while (stable < 4 && Date.now() < deadline) {
+      await sleep(400);
       const cur = document.body?.innerHTML?.length ?? 0;
       if (cur === lastHtml) stable++;
       else { stable = 0; lastHtml = cur; }
+    }
+    const interactiveDeadline = Date.now() + 5000;
+    while (Date.now() < interactiveDeadline) {
+      const buttons = document.querySelectorAll('button, a[href], [role="button"], input[type="submit"]');
+      if (buttons.length > 0) break;
+      await sleep(300);
     }
   }
 
@@ -298,7 +260,7 @@
       if (!text || text.length > 200) continue;
 
       let href = resolveHref(node) || "";
-      if (isProfileAction(text, href)) continue;
+      if (href && isForbiddenNavigationUrl(href, location.href)) continue;
       if (!href && hiddenApplyUrl) {
         const parentText = clean(node.closest("section, article, main, form, div")?.textContent || "");
         if (parentText.length > 5) href = "";
@@ -337,7 +299,7 @@
     return { elements, fieldItems };
   }
 
-  async function callStep(step, history, hiddenApplyUrl, elements) {
+  async function callStep(step, history, hiddenApplyUrl, elements, blockedElementIds) {
     const reply = await extensionMessage({
       type: "JOBMATE_ANALYZE_PAGE",
       pageUrl: location.href,
@@ -345,7 +307,8 @@
       stepIndex: step,
       history,
       hiddenApplyUrl: hiddenApplyUrl || null,
-      elements
+      elements,
+      blockedElementIds: [...blockedElementIds]
     });
     if (!reply?.ok) throw new Error(reply?.error || "Analyze failed.");
     return reply.action;
@@ -457,11 +420,22 @@
       });
     }
 
+    function isRendered(node) {
+      if (!node.isConnected) return false;
+      const rect = node.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) return false;
+      const style = window.getComputedStyle(node);
+      if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return false;
+      return true;
+    }
+
     for (const root of fieldRoots()) {
       for (const node of queryDeep("input, textarea, select", root)) {
         const tag = node.tagName.toLowerCase();
         const type = tag === "input" ? String(node.type || "text").toLowerCase() : tag;
-        if (["hidden", "button", "submit", "reset", "image"].includes(type)) continue;
+        if (["hidden", "button", "submit", "reset", "image", "search"].includes(type)) continue;
+        if (node.closest('[role="search"], search')) continue;
+        if (!isRendered(node)) continue;
         pushField(node, type, tag);
       }
     }
@@ -470,6 +444,7 @@
       for (const node of queryDeep("[contenteditable=true]", root)) {
         if (node.querySelector("[contenteditable=true]")) continue;
         if (node.querySelector("input, textarea, select")) continue;
+        if (!isRendered(node)) continue;
         pushField(node, "contenteditable", "div");
       }
     }
@@ -1288,11 +1263,8 @@
     const fields = elements.filter((e) => e.type === "field");
     if (!fields.length) return false;
     const hasPassword = fields.some((f) => f.fieldType === "password");
-    const hasFile = fields.some((f) => f.fieldType === "file");
-    const hasTextarea = fields.some((f) => f.fieldType === "textarea" || f.fieldType === "contenteditable");
-    if (hasFile || hasTextarea) return true;
-    if (hasPassword && fields.length < 8) return false;
-    return fields.length >= 8;
+    if (hasPassword) return false;
+    return true;
   }
 
   function isAuthFormPage(elements) {
@@ -1312,22 +1284,7 @@
     ]);
   }
 
-  function jobIdFromApplyUrl(url) {
-    const match = String(url || "").match(/\/jobs\/(\d+)/i);
-    return match?.[1] || "";
-  }
-
-  function pageLooksLikeJobListingIndex() {
-    let count = 0;
-    for (const anchor of document.querySelectorAll('a[href*="/jobs/"]')) {
-      count += 1;
-      if (count >= 3) return true;
-    }
-    return false;
-  }
-
   const urlPingPongTrack = { a: null, b: null, last: null, switches: 0 };
-  let listingAutoNavigateUsed = false;
 
   function resetUrlPingPongTrack() {
     urlPingPongTrack.a = null;
@@ -1339,7 +1296,7 @@
   function recordUrlPingPong(href) {
     const u = normalizeHref(href);
     if (!u) return false;
-    if (u === urlPingPongTrack.last) return urlPingPongTrack.switches >= 3;
+    if (u === urlPingPongTrack.last) return urlPingPongTrack.switches >= 2;
     if (!urlPingPongTrack.a) {
       urlPingPongTrack.a = u;
       urlPingPongTrack.last = u;
@@ -1354,7 +1311,7 @@
     if (u === urlPingPongTrack.a || u === urlPingPongTrack.b) {
       urlPingPongTrack.switches += 1;
       urlPingPongTrack.last = u;
-      return urlPingPongTrack.switches >= 3;
+      return urlPingPongTrack.switches >= 2;
     }
     return false;
   }
@@ -1364,43 +1321,6 @@
       "Stopped: the page kept switching between the same two URLs.",
       "Open the job application page directly, then click Continue."
     );
-  }
-
-  function navigateToTargetListingIfNeeded(applyUrl) {
-    const targetNorm = normalizeHref(applyUrl);
-    if (normalizeHref(location.href) === targetNorm) {
-      return false;
-    }
-
-    const host = location.hostname.replace(/^www\./i, "").toLowerCase();
-    const onCompany = /\/companies\//i.test(location.pathname);
-    const targetIsJob = /\/jobs\//i.test(applyUrl);
-    if (host === "workatastartup.com" && onCompany && targetIsJob) {
-      if (listingAutoNavigateUsed || urlPingPongTrack.switches >= 1) {
-        return false;
-      }
-      listingAutoNavigateUsed = true;
-    }
-
-    const targetJobId = jobIdFromApplyUrl(applyUrl);
-    let matchedHref = null;
-
-    for (const anchor of document.querySelectorAll("a[href]")) {
-      const href = resolveHref(anchor);
-      if (!href) continue;
-      if (normalizeHref(href) === targetNorm) {
-        return navigateNow(href);
-      }
-      if (targetJobId && jobIdFromApplyUrl(href) === targetJobId) {
-        matchedHref = href;
-      }
-    }
-
-    if (matchedHref) {
-      return navigateNow(matchedHref);
-    }
-
-    return false;
   }
 
   function isSubmitLike(node, action) {
@@ -1413,7 +1333,10 @@
   async function run() {
     const payloadUrl = await resolvePayloadUrl();
     if (!payloadUrl) return;
+    await runWithPayloadUrl(payloadUrl);
+  }
 
+  async function runWithPayloadUrl(payloadUrl) {
     if (!(await verifyRunner(payloadUrl))) {
       return;
     }
@@ -1429,8 +1352,9 @@
     const history = [];
     const handledForms = new Set();
     const failuresByState = new Map();
-    const MAX_STEPS = 30;
-    const STUCK_THRESHOLD = 2;
+    const blockedElementIds = new Set();
+    const MAX_STEPS = 20;
+    const STUCK_THRESHOLD = 3;
     let lastReason = "";
 
     async function checkStuck(stateBefore, instruction) {
@@ -1465,14 +1389,16 @@
         continue;
       }
 
-      const targetApplyUrl = String(payload.applyUrl || "").trim();
-      if (
-        targetApplyUrl &&
-        (pageLooksLikeJobListingIndex() || normalizeHref(location.href) !== normalizeHref(targetApplyUrl))
-      ) {
-        if (navigateToTargetListingIfNeeded(targetApplyUrl)) {
-          return;
-        }
+      if (pageHostName() === "workatastartup.com") {
+        try {
+          if (isWorkAtAStartupApplicantPortalPath(new URL(location.href).pathname)) {
+            await requestHumanHelp(
+              "Blocked: landed on Work at a Startup account/profile page.",
+              "Use the browser back button to return to the job listing (/jobs/…), then click Continue."
+            );
+            continue;
+          }
+        } catch {}
       }
 
       const hiddenApplyUrl = extractHiddenApplyUrl();
@@ -1489,8 +1415,8 @@
           failuresByState.delete(stateBefore);
           panel(["JobMate", `Application form — ${fieldItems.length} fields`, "Generating answers…"]);
           await fillApplicationForm(payload);
-          await showConfirmPanel();
-          return;
+          history.push({ step, tool: "form_fill", reasoning: `filled ${fieldItems.length} fields` });
+          continue;
         }
 
         if (isAuthFormPage(elements)) {
@@ -1509,33 +1435,8 @@
         }
       }
 
-      if (!isApplicationFormPage(elements) && !isAuthFormPage(elements)) {
-        const applyAction = findPrimaryApplyAction(elements);
-        if (applyAction) {
-          const histEntry = {
-            step,
-            tool: "click",
-            reasoning: `Apply button: ${applyAction.text}`,
-            elementId: applyAction.elementId,
-            url: null
-          };
-          lastReason = histEntry.reasoning;
-          panel([`JobMate · step ${step + 1}/${MAX_STEPS}`, "Clicking Apply…"]);
-          const ok = await activateElement(payloadUrl, applyAction.elementId, elements, {
-            step,
-            maxSteps: MAX_STEPS,
-            action: { tool: "click", elementId: applyAction.elementId, url: null, reasoning: histEntry.reasoning }
-          });
-          if (ok === "navigated") return;
-          history.push(histEntry);
-          if (ok) failuresByState.delete(stateBefore);
-          await checkStuck(stateBefore, "Please click Apply manually, then click Continue.");
-          continue;
-        }
-      }
-
       panel([`JobMate · step ${step + 1}/${MAX_STEPS}`, "Navigating…"]);
-      const action = await callStep(step, history, hiddenApplyUrl, elements);
+      const action = await callStep(step, history, hiddenApplyUrl, elements, blockedElementIds);
       const histEntry = {
         step,
         tool: action.tool,
@@ -1563,6 +1464,14 @@
       }
 
       if (action.tool === "navigate" && action.url) {
+        if (isForbiddenNavigationUrl(action.url, location.href)) {
+          blockedElementIds.add(action.elementId || `nav:${action.url}`);
+          await requestHumanHelp(
+            "Blocked forbidden navigation.",
+            "Return to the job listing and click Apply there, then click Continue."
+          );
+          continue;
+        }
         statusPanel(step, MAX_STEPS, action);
         if (navigateNow(action.url)) return;
         history.push({ ...histEntry, reasoning: "already on target page" });
@@ -1570,11 +1479,24 @@
         continue;
       }
 
+      if (action.tool === "submit" && action.elementId) {
+        await showConfirmPanel();
+        const ok = await activateElement(payloadUrl, action.elementId, elements, { step, maxSteps: MAX_STEPS, action });
+        if (ok === "navigated") return;
+        history.push(histEntry);
+        if (!ok) blockedElementIds.add(action.elementId);
+        return;
+      }
+
       if (action.tool === "click" && action.elementId) {
         const ok = await activateElement(payloadUrl, action.elementId, elements, { step, maxSteps: MAX_STEPS, action });
         if (ok === "navigated") return;
         history.push(histEntry);
-        if (ok) failuresByState.delete(stateBefore);
+        if (ok) {
+          failuresByState.delete(stateBefore);
+        } else {
+          blockedElementIds.add(action.elementId);
+        }
         await checkStuck(stateBefore, "Please click the required button manually, then click Continue.");
         continue;
       }
@@ -1585,6 +1507,15 @@
 
     panel(["JobMate: step limit reached", "Could not reach application form."]);
   }
+
+  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    if (msg?.type !== "JOBMATE_START_APPLY") {
+      return;
+    }
+    run().catch((err) => panel(`JobMate error: ${err?.message ?? String(err)}`));
+    sendResponse({ ok: true });
+    return true;
+  });
 
   run().catch((err) => panel(`JobMate error: ${err?.message ?? String(err)}`));
 })();

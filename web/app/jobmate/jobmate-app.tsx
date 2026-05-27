@@ -1024,7 +1024,7 @@ export function JobmateApp() {
         </nav>
       </aside>
       <main
-        className={`flex min-h-0 w-full flex-1 flex-col px-8 py-10 ${page === "home" ? "overflow-hidden" : "overflow-auto"}`}
+        className={`flex min-h-0 w-full flex-1 flex-col px-8 ${page === "home" ? "overflow-hidden pt-10 pb-0" : "overflow-auto py-10"}`}
       >
         {fetchError ? (
           <p className="text-sm text-red-600 dark:text-red-400">{fetchError}</p>
@@ -1330,8 +1330,8 @@ function HomePanel(props: {
   }, [bucketJobs, sortBy]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col space-y-8">
-      <div className="flex flex-wrap items-center justify-between gap-3">
+    <div className="flex h-full min-h-0 flex-col gap-4">
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-3">
         <h2 className="text-xl font-semibold tracking-tight">Home</h2>
         <div className="flex items-center gap-3">
           <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
@@ -1356,7 +1356,7 @@ function HomePanel(props: {
         </div>
       </div>
 
-      <section className="space-y-3">
+      <section className="shrink-0 space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300">Targets</h3>
           <div className="flex flex-wrap gap-2">
@@ -1604,7 +1604,7 @@ function HomePanel(props: {
                 </div>
               ) : (
                 <div className="min-h-0 h-full w-full overflow-auto">
-                  <div className="mx-auto grid max-w-[1490px] grid-cols-3 place-content-start justify-center gap-4 p-4">
+                  <div className="grid w-full gap-0.5 p-0.5 [grid-template-columns:repeat(auto-fill,minmax(min(100%,280px),1fr))]">
                     {sortedVisibleResultJobs.map((j) => (
                       <JobResultCard
                         key={j.id}

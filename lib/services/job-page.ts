@@ -336,10 +336,24 @@ function extractCompanyLogoUrl($: cheerio.CheerioAPI, sourceUrl: string, jsonLdL
 
   for (const candidate of candidates) {
     try {
-      const absolute = new URL(candidate, sourceUrl).toString();
-      if (/^https?:\/\//i.test(absolute)) {
-        return absolute;
+      let absolute = new URL(candidate, sourceUrl).toString();
+      if (!/^https?:\/\//i.test(absolute)) {
+        continue;
       }
+      try {
+        const parsed = new URL(absolute);
+        if (parsed.hostname === "next.jobteaser.com" || parsed.hostname.endsWith("jobteasercdn.com")) {
+          const inner = parsed.searchParams.get("url");
+          if (inner) {
+            absolute = new URL(inner).toString();
+          }
+        }
+      } catch {
+      }
+      if (absolute.startsWith("http://")) {
+        absolute = `https://${absolute.slice(7)}`;
+      }
+      return absolute;
     } catch {
     }
   }

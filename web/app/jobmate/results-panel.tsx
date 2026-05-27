@@ -2,6 +2,7 @@ import { useState } from "react";
 
 import { normalizeApplyUrl } from "@/lib/apply-url";
 
+import { companyLogoProxyPath } from "./company-logo-url";
 import { openBackgroundTabViaExtension } from "./extension-open-tab";
 
 export type ResultJobRow = {
@@ -150,11 +151,12 @@ export function JobResultCard(props: {
 }) {
   const { job, selected, onToggleSelect, onApply, onViewListing, onMarkApplied, onArchive, onViewContacts } = props;
   const summary = cardSummary(job.summary);
+  const logoSrc = companyLogoProxyPath(job.company_logo_url);
   const btn =
     "rounded border border-gray-300 px-2 py-1 text-xs font-medium text-gray-800 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-100 dark:hover:bg-gray-800";
 
   return (
-    <article className="relative box-border flex h-[300px] w-[470px] overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm dark:border-gray-700 dark:bg-gray-900">
+    <article className="relative box-border flex h-[300px] w-full min-w-0 max-w-[470px] overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm dark:border-gray-700 dark:bg-gray-900">
       <input
         type="checkbox"
         checked={selected}
@@ -178,8 +180,8 @@ export function JobResultCard(props: {
         </div>
         <div className="flex w-[128px] shrink-0 flex-col items-end justify-between">
           <div className="flex h-20 w-20 items-center justify-center overflow-hidden rounded-lg border border-gray-200 bg-gray-50 dark:border-gray-700 dark:bg-gray-800">
-            {job.company_logo_url ? (
-              <img src={job.company_logo_url} alt="" className="max-h-full max-w-full object-contain" />
+            {logoSrc ? (
+              <img src={logoSrc} alt="" className="max-h-full max-w-full object-contain" />
             ) : (
               <span className="px-1 text-center text-[10px] uppercase tracking-wide text-gray-400">No logo</span>
             )}

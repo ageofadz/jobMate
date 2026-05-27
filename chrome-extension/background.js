@@ -1,4 +1,4 @@
-importScripts("jobmate-app-url.js");
+importScripts("jobmate-app-url.js", "apply-navigation.js");
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -22,7 +22,7 @@ chrome.runtime.onConnect.addListener((p) => {
 
 function pushToSidePanel(msg) {
   if (!sidePanelPort) return;
-  try { sidePanelPort.postMessage(msg); } catch {}
+  try { sidePanelPort.postMessage(msg); } catch { }
 }
 
 // ── Task system ─────────────────────────────────────────────────────────────
@@ -87,13 +87,13 @@ async function createTaskTabGroup(title, color = "blue") {
 }
 
 async function addTabToGroup(tabId, groupId) {
-  await chrome.tabs.group({ tabIds: [tabId], groupId }).catch(() => {});
+  await chrome.tabs.group({ tabIds: [tabId], groupId }).catch(() => { });
 }
 
 async function openTabInGroup(url, groupId, active = false) {
   const tab = await chrome.tabs.create({ url, active });
   if (groupId != null) {
-    await addTabToGroup(tab.id, groupId).catch(() => {});
+    await addTabToGroup(tab.id, groupId).catch(() => { });
   }
   return tab;
 }
@@ -249,7 +249,7 @@ async function handleTaskSubmit(text) {
       hasInput: false,
       buttonLabel: "OK"
     });
-    pendingCalloutResolvers.set("cfg", () => {});
+    pendingCalloutResolvers.set("cfg", () => { });
     return;
   }
 
@@ -313,7 +313,7 @@ async function runTaskPlan(task, steps, cfg, groupId, originalText) {
         try {
           await executeStep(task, { ...step, detail: reply }, cfg, groupId);
           setTaskStep(task.id, step.label, "done");
-        } catch {}
+        } catch { }
       }
     }
   }
@@ -347,7 +347,7 @@ async function executeSearchStep(task, step, cfg, groupId) {
   const query = step.detail || step.label;
   const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
   const tab = await openTabInGroup(searchUrl, groupId, false);
-  await waitTabComplete(tab.id, 30000).catch(() => {});
+  await waitTabComplete(tab.id, 30000).catch(() => { });
 }
 
 async function executeApplyStep(task, step, cfg, groupId) {
@@ -371,7 +371,7 @@ async function executeApplyStep(task, step, cfg, groupId) {
 
 async function executeEmailStep(task, step, cfg, groupId) {
   const tab = await openTabInGroup("https://mail.google.com/mail/u/0/#inbox", groupId, true);
-  await waitTabComplete(tab.id, 30000).catch(() => {});
+  await waitTabComplete(tab.id, 30000).catch(() => { });
   await requestCallout(task.id, {
     kind: "info",
     label: "Email",
@@ -407,7 +407,7 @@ function parseJsonObjectExt(text) {
   if (!trimmed) throw new Error("Empty LLM output.");
   const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
   const candidate = fenced?.[1]?.trim() ?? trimmed;
-  try { return JSON.parse(candidate); } catch {}
+  try { return JSON.parse(candidate); } catch { }
   const start = candidate.indexOf("{");
   if (start < 0) throw new Error("LLM output did not contain a JSON object.");
   let depth = 0, inStr = false, escape = false;
@@ -495,7 +495,7 @@ async function syncExtensionConfigFromJobMateApp() {
       if (await syncExtensionConfigFromTab(tab.id)) {
         return true;
       }
-    } catch {}
+    } catch { }
   }
 
   return false;
@@ -598,10 +598,7 @@ async function generateFormAnswersExt(tabId, fields, retryNote, pageLanguage) {
   const listingText = jobData.listingText || "";
   let coverLetterText = jobData.coverLetterText || "";
 
-  const hasCoverLetterField = fields.some((f) =>
-    f.type === "textarea" ||
-    /cover.?letter|motivation|letter of interest|supporting statement|message to (the )?(hiring|recruitment|team)|why.*(join|apply|interested|challenge)/i.test(f.label)
-  );
+  const hasCoverLetterField = fields.some((f) => f.type === "textarea" || f.type === "contenteditable");
 
   if (hasCoverLetterField && !coverLetterText) {
     try {
@@ -609,7 +606,7 @@ async function generateFormAnswersExt(tabId, fields, retryNote, pageLanguage) {
       if (payloadUrl) {
         internalSessionJobData.set(payloadUrl, { ...(internalSessionJobData.get(payloadUrl) ?? {}), coverLetterText });
       }
-    } catch {}
+    } catch { }
   }
 
   const prompt = [
@@ -700,7 +697,7 @@ function recordApplyPageUrlOscillation(tabId, pageUrl) {
     track = { a: null, b: null, last: null, switches: 0 };
     applyPageUrlOscillationByTab.set(tabId, track);
   }
-  if (u === track.last) return track.switches >= 3;
+  if (u === track.last) return track.switches >= 2;
   if (!track.a) {
     track.a = u;
     track.last = u;
@@ -715,7 +712,7 @@ function recordApplyPageUrlOscillation(tabId, pageUrl) {
   if (u === track.a || u === track.b) {
     track.switches += 1;
     track.last = u;
-    return track.switches >= 3;
+    return track.switches >= 2;
   }
   return false;
 }
@@ -727,7 +724,11 @@ async function nextBrowserActionExt(tabId, pageData) {
   const model = config.geminiModel?.trim() || GEMINI_FALLBACK_MODELS[0];
   const jobData = getSessionJobData(tabId);
 
-  const { pageUrl, pageText, stepIndex, history, hiddenApplyUrl, elements } = pageData;
+  const { pageUrl, pageText, stepIndex, history, hiddenApplyUrl, elements, blockedElementIds } = pageData;
+  const blockedIds = new Set([
+    ...blockedIdsFromHistory(history),
+    ...(Array.isArray(blockedElementIds) ? blockedElementIds.map(String) : [])
+  ]);
 
   if (recordApplyPageUrlOscillation(tabId, pageUrl)) {
     return {
@@ -759,29 +760,50 @@ async function nextBrowserActionExt(tabId, pageData) {
     }
   })();
 
-  const actions = (elements || [])
-    .filter((e) => e.type === "action")
-    .filter((e) => {
-      if (pageHost !== "workatastartup.com") return true;
-      const t = String(e.text || "").trim();
-      if (/^view job$/i.test(t)) return false;
-      if (e.href) {
-        try {
-          const targetPath = new URL(targetApplyUrl).pathname;
-          const hrefPath = new URL(resolveUrl(String(e.href), pageUrl)).pathname;
-          if (/\/jobs\/\d+/i.test(targetPath) && /\/companies\//i.test(hrefPath)) return false;
-        } catch {}
+  if (pageHost === "workatastartup.com") {
+    try {
+      if (isWorkAtAStartupApplicantPortalPath(new URL(pageUrl).pathname)) {
+        return {
+          ok: true,
+          action: {
+            tool: "blocked",
+            elementId: null,
+            url: null,
+            text: null,
+            value: null,
+            reasoning:
+              "Blocked: Work at a Startup account/profile page (/application/*). Go back to the job listing (/jobs/…), then click Continue.",
+            coverLetterElementIds: [],
+            coverLetterRevealIds: [],
+            resumeElementIds: []
+          }
+        };
       }
-      return true;
-    });
+    } catch {}
+  }
+
+  const allActions = (elements || []).filter((e) => e.type === "action");
+  const actions = allActions.filter((e) => !blockedIds.has(e.elementId));
   const fields = (elements || []).filter((e) => e.type === "field");
-  const validElementIds = new Set([...actions.map((e) => e.elementId), ...fields.map((e) => e.elementId)]);
+  const validElementIds = new Set([...allActions.map((e) => e.elementId), ...fields.map((e) => e.elementId)]);
 
   function resolveUrl(url, base) { try { return new URL(url, base).toString(); } catch { return ""; } }
 
-  const allowedUrls = new Set(
-    [targetApplyUrl, hiddenApplyUrl, ...actions.map((a) => a.href ?? "").map((u) => resolveUrl(u, pageUrl))].filter(Boolean)
-  );
+  const allowedUrls = new Set();
+  for (const candidate of [targetApplyUrl, hiddenApplyUrl]) {
+    if (!candidate) continue;
+    const resolved = resolveUrl(candidate, pageUrl);
+    if (resolved && isAllowedNavigateUrl(resolved, pageUrl, pageHost, targetApplyUrl)) {
+      allowedUrls.add(resolved);
+    }
+  }
+  for (const a of allActions) {
+    if (!a.href) continue;
+    const resolved = resolveUrl(a.href, pageUrl);
+    if (resolved && isAllowedNavigateUrl(resolved, pageUrl, pageHost, targetApplyUrl)) {
+      allowedUrls.add(resolved);
+    }
+  }
 
   function compactEl(e) {
     const out = { id: e.elementId, tag: e.tag };
@@ -807,21 +829,36 @@ async function nextBrowserActionExt(tabId, pageData) {
     return out;
   });
 
+  const hasApplicationForm = fields.some((f) => f.fieldType === "file" || f.fieldType === "textarea" || f.fieldType === "contenteditable") || fields.length >= 8;
+
   const prompt = [
-    "Browser agent. Goal: reach the job application form for the target job listing by clicking Apply / Apply now / Continue application buttons.",
-    "Return ONE action as JSON, no other text.",
-    '{"tool":"navigate|click|wait|blocked","elementId":null,"url":null,"reasoning":""}',
-    "Tools: navigate(url) click(elementId) wait blocked",
-    "Rules: navigation only — the extension fills forms automatically | prefer Apply / Apply now / Start application clicks | never click profile, account, dashboard, saved jobs, or settings links | on auth pages click register/sign-in only when needed to continue applying",
-    pageHost === "workatastartup.com" ? 'WorkAtAStartup rule: never click \"View Job\" (it navigates back). If an Apply button exists, click Apply.' : "",
-    targetTitle ? `Target job: "${targetTitle}" at ${targetCompany}` : `Target: apply on current page`,
+    "You are controlling a browser to complete a job application.",
+    "Examine the page and choose ONE action from CLICKABLE ELEMENTS that advances the application.",
+    "Return exactly one JSON object, no other text:",
+    '{"tool":"click|submit|navigate|wait|blocked","elementId":null,"url":null,"reasoning":""}',
+    "Rules:",
+    "- click: advance to the next step (Next, Continue, Accept terms, etc.)",
+    "- submit: use ONLY when clicking this button would FINALLY submit the completed application to the employer. Do NOT use submit for Next/Continue wizard steps.",
+    "- navigate: only to one of the Allowed URLs listed below",
+    "- wait: only if the page is still loading",
+    "- blocked: only if you genuinely cannot proceed",
+    "- Do NOT click elements whose URL resolves to a profile, account, settings, dashboard, or inbox page",
+    pageHost === "workatastartup.com"
+      ? "- On workatastartup.com: NEVER use navigate. NEVER go to /application/* (that is an account page, not a job form). Only click the Apply button on the job listing."
+      : "",
+    targetTitle ? `Target job: "${targetTitle}" at ${targetCompany}` : "Target: apply on this page",
     `Target listing URL: ${targetApplyUrl}`,
     hiddenApplyUrl ? `Hidden apply URL: ${hiddenApplyUrl}` : "",
     `Current page: ${pageUrl} | step: ${stepIndex}`,
+    blockedIds.size ? `Already tried (do not repeat): ${JSON.stringify([...blockedIds])}` : "",
     compactHistory.length ? `History: ${JSON.stringify(compactHistory)}` : "",
-    `Allowed URLs: ${JSON.stringify([...allowedUrls])}`,
-    fields.length ? `FORM DETECTED (${fields.length} fields) — extension will fill automatically; click Apply only if this is not yet the application form` : "",
-    `PAGE:\n${String(pageText || "").slice(0, 2500)}`,
+    allowedUrls.size ? `Allowed navigate URLs: ${JSON.stringify([...allowedUrls])}` : "No navigate URLs available — use click only",
+    hasApplicationForm
+      ? `Application form is present (${fields.length} fields). The extension will fill it automatically. Only click Next/Continue/Submit if the form is not yet submitted.`
+      : fields.length
+        ? `${fields.length} form fields visible — this may be a wizard step. Click the button that advances to the next step or submits.`
+        : "No form fields yet. Find and click the Apply or equivalent button in any language.",
+    `PAGE TEXT:\n${String(pageText || "").slice(0, 2000)}`,
     `CLICKABLE ELEMENTS:\n${compactActions}`
   ].filter(Boolean).join("\n");
 
@@ -829,25 +866,47 @@ async function nextBrowserActionExt(tabId, pageData) {
   const parsed = parseJsonObjectExt(raw);
 
   const toolRaw = String(parsed.tool ?? "");
-  const validTools = ["navigate", "click", "wait", "blocked"];
+  const validTools = ["navigate", "click", "submit", "wait", "blocked"];
   const tool = validTools.includes(toolRaw) ? toolRaw : "wait";
 
   const elementIdRaw = parsed.elementId ? String(parsed.elementId) : "";
-  const elementId = validElementIds.has(elementIdRaw) ? elementIdRaw : null;
-
-  const urlRaw = parsed.url ? resolveUrl(String(parsed.url), pageUrl) : "";
-  let url = allowedUrls.has(urlRaw) ? urlRaw : null;
-  if (pageHost === "workatastartup.com" && url) {
-    try {
-      const targetPath = new URL(targetApplyUrl).pathname;
-      const navPath = new URL(url).pathname;
-      if (/\/jobs\/\d+/i.test(targetPath) && /\/companies\//i.test(navPath)) {
-        url = null;
-      }
-    } catch {}
+  let elementId = validElementIds.has(elementIdRaw) ? elementIdRaw : null;
+  if (elementId) {
+    const picked = allActions.find((e) => e.elementId === elementId);
+    if (
+      blockedIds.has(elementId) ||
+      (picked && picked.href && isForbiddenNavigationUrl(String(picked.href), pageUrl))
+    ) {
+      elementId = null;
+    }
   }
 
-  const resolvedTool = tool === "navigate" && !url && elementId ? "click" : tool === "click" && !elementId && url ? "navigate" : tool;
+  const urlRaw = parsed.url ? resolveUrl(String(parsed.url), pageUrl) : "";
+  let url =
+    urlRaw && allowedUrls.has(urlRaw) && isAllowedNavigateUrl(urlRaw, pageUrl, pageHost, targetApplyUrl) ? urlRaw : null;
+
+  let resolvedTool = tool === "navigate" && !url && elementId ? "click" : (tool === "click" || tool === "submit") && !elementId && url ? "navigate" : tool;
+  if (pageHost === "workatastartup.com" && resolvedTool === "navigate") {
+    resolvedTool = elementId ? "click" : "blocked";
+  }
+  if (url && isForbiddenNavigationUrl(url, pageUrl)) {
+    url = null;
+    if (resolvedTool === "navigate") {
+      resolvedTool = elementId ? "click" : "blocked";
+    }
+  }
+  if (resolvedTool === "click" && !elementId) {
+    resolvedTool = "blocked";
+  }
+  if (resolvedTool === "navigate" && !url) {
+    resolvedTool = "blocked";
+  }
+  if (resolvedTool === "wait" && compactHistory.length >= 2) {
+    const lastTwo = compactHistory.slice(-2);
+    if (lastTwo.every((h) => h.t === "wait")) {
+      resolvedTool = "blocked";
+    }
+  }
 
   return { ok: true, action: { tool: resolvedTool, elementId, url, text: null, value: null, reasoning: String(parsed.reasoning ?? ""), coverLetterElementIds: [], coverLetterRevealIds: [], resumeElementIds: [] } };
 }
@@ -864,7 +923,7 @@ function setApplySession(tabId, payloadUrl, openerTabId) {
 }
 
 chrome.action.onClicked.addListener((tab) => {
-  chrome.sidePanel.open({ windowId: tab.windowId }).catch(() => {});
+  chrome.sidePanel.open({ windowId: tab.windowId }).catch(() => { });
 });
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -917,7 +976,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   }
 
   if (notifyTabId) {
-    chrome.tabs.sendMessage(notifyTabId, { type: "JOBMATE_APPLY_CLOSED", tabId }).catch(() => {});
+    chrome.tabs.sendMessage(notifyTabId, { type: "JOBMATE_APPLY_CLOSED", tabId }).catch(() => { });
   }
 });
 
@@ -941,7 +1000,7 @@ function payloadForAutomationTab(tabId) {
 async function registerApplyAutomationTab(tabId, payloadUrl, uiTabId) {
   applyAutomationTabByPayload.set(payloadUrl, tabId);
   setApplySession(tabId, payloadUrl, uiTabId);
-  await chrome.tabs.update(tabId, { active: false }).catch(() => {});
+  await chrome.tabs.update(tabId, { active: false }).catch(() => { });
 }
 
 async function openApplyAutomationTab(url, payloadUrl, uiTabId, groupId = null) {
@@ -953,7 +1012,7 @@ async function openApplyAutomationTab(url, payloadUrl, uiTabId, groupId = null) 
     if (existing?.id) {
       applyAutomationTabByPayload.set(payloadUrl, existingId);
       setApplySession(existingId, payloadUrl, uiTabId);
-      await chrome.tabs.update(existingId, { url, active: false }).catch(() => {});
+      await chrome.tabs.update(existingId, { url, active: false }).catch(() => { });
       return existingId;
     }
 
@@ -969,14 +1028,14 @@ async function openApplyAutomationTab(url, payloadUrl, uiTabId, groupId = null) 
 
   applyAutomationTabByPayload.set(payloadUrl, tabId);
   setApplySession(tabId, payloadUrl, uiTabId);
-  await chrome.tabs.update(tabId, { active: false }).catch(() => {});
+  await chrome.tabs.update(tabId, { active: false }).catch(() => { });
 
   if (groupId != null) {
-    await addTabToGroup(tabId, groupId).catch(() => {});
+    await addTabToGroup(tabId, groupId).catch(() => { });
   } else {
     const newGroupId = await chrome.tabs.group({ tabIds: [tabId] }).catch(() => null);
     if (newGroupId != null) {
-      await chrome.tabGroups.update(newGroupId, { title: "JobMate Apply", color: "green" }).catch(() => {});
+      await chrome.tabGroups.update(newGroupId, { title: "JobMate Apply", color: "green" }).catch(() => { });
     }
   }
 
@@ -1020,7 +1079,7 @@ async function createIsolatedCrawlerTab(initialUrl = "about:blank") {
 
   const groupId = await chrome.tabs.group({ tabIds: [tab.id] }).catch(() => null);
   if (groupId != null) {
-    await chrome.tabGroups.update(groupId, { title: "JobMate Crawl", color: "grey", collapsed: true }).catch(() => {});
+    await chrome.tabGroups.update(groupId, { title: "JobMate Crawl", color: "grey", collapsed: true }).catch(() => { });
   }
 
   return { tabId: tab.id, windowId: tab.windowId, groupId };
@@ -1028,7 +1087,7 @@ async function createIsolatedCrawlerTab(initialUrl = "about:blank") {
 
 async function closeIsolatedCrawlerWindow(windowId, tabId) {
   if (tabId != null) {
-    await chrome.tabs.remove(tabId).catch(() => {});
+    await chrome.tabs.remove(tabId).catch(() => { });
   }
 }
 
@@ -1117,7 +1176,7 @@ function scrapeGoogleOrganicInjected() {
         if (q) {
           h = q;
         }
-      } catch (_) {}
+      } catch (_) { }
     }
 
     return h;
@@ -1787,7 +1846,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               tabId,
               applyUrl
             })
-            .catch(() => {});
+            .catch(() => { });
         }
 
         sendResponse({ ok: true, tabId });
@@ -1828,7 +1887,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           func: () => (document.body?.innerText || "").replace(/\s+/g, " ").trim().slice(0, 40000)
         });
         const text = injected[0]?.result || "";
-        await chrome.tabs.remove(tabId).catch(() => {});
+        await chrome.tabs.remove(tabId).catch(() => { });
         tabId = null;
         sendResponse({ ok: true, text });
       } catch (err) {
@@ -1852,19 +1911,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       };
 
       if (notifyTabId) {
-        await chrome.tabs.sendMessage(notifyTabId, payload).catch(() => {});
+        await chrome.tabs.sendMessage(notifyTabId, payload).catch(() => { });
       }
 
       if (applyTabId && applyTab?.windowId) {
-        await chrome.windows.update(applyTab.windowId, { focused: true }).catch(() => {});
-        await chrome.tabs.update(applyTabId, { active: true }).catch(() => {});
+        await chrome.windows.update(applyTab.windowId, { focused: true }).catch(() => { });
+        await chrome.tabs.update(applyTabId, { active: true }).catch(() => { });
       } else if (!notifyTabId) {
         const tabs = await chrome.tabs.query({});
         for (const tab of tabs) {
           const url = tab.url || "";
           if (!tab.id || tab.id === applyTabId) continue;
           if (!isJobMateAppUrl(url)) continue;
-          await chrome.tabs.sendMessage(tab.id, payload).catch(() => {});
+          await chrome.tabs.sendMessage(tab.id, payload).catch(() => { });
         }
       }
 
@@ -1991,12 +2050,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
       const specs = Array.isArray(msg.specs)
         ? msg.specs
-            .filter((spec) => spec && typeof spec.id === "string" && typeof spec.url === "string")
-            .map((spec) => ({
-              id: String(spec.id),
-              label: String(spec.label || spec.id),
-              url: String(spec.url)
-            }))
+          .filter((spec) => spec && typeof spec.id === "string" && typeof spec.url === "string")
+          .map((spec) => ({
+            id: String(spec.id),
+            label: String(spec.label || spec.id),
+            url: String(spec.url)
+          }))
         : [];
       const limitPerSpec = Math.max(1, Math.min(100, Number(msg.limitPerSpec) || 100));
 
@@ -2024,12 +2083,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
       const specs = Array.isArray(msg.specs)
         ? msg.specs
-            .filter((spec) => spec && typeof spec.id === "string" && typeof spec.url === "string")
-            .map((spec) => ({
-              id: String(spec.id),
-              label: String(spec.label || spec.id),
-              url: String(spec.url)
-            }))
+          .filter((spec) => spec && typeof spec.id === "string" && typeof spec.url === "string")
+          .map((spec) => ({
+            id: String(spec.id),
+            label: String(spec.label || spec.id),
+            url: String(spec.url)
+          }))
         : [];
       const limitPerSpec = Math.max(1, Math.min(100, Number(msg.limitPerSpec) || 100));
 
@@ -2073,20 +2132,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const sessionKey = `ext://session/${sessionId}`;
       internalSessionJobData.set(sessionKey, {
         applyUrl: pageUrl,
-        title: "", company: "", listingText: "", jobId: "",
-        companyHomepage: "", linkedinLinks: [], hiringContacts: [], coverLetterText: ""
+        title: "",
+        company: "",
+        listingText: "",
+        jobId: "",
+        companyHomepage: "",
+        linkedinLinks: [],
+        hiringContacts: [],
+        coverLetterText: ""
       });
 
       await registerApplyAutomationTab(pageTabId, sessionKey, null);
+      await chrome.tabs.update(pageTabId, { active: true }).catch(() => { });
 
-      let navigateUrl = pageUrl;
-      try {
-        const u = new URL(pageUrl);
-        u.hash = `jobmateSession=${encodeURIComponent(sessionId)}`;
-        navigateUrl = u.toString();
-      } catch {}
-
-      await chrome.tabs.update(pageTabId, { url: navigateUrl }).catch(() => {});
+      const started = await chrome.tabs.sendMessage(pageTabId, { type: "JOBMATE_START_APPLY" }).catch(() => null);
+      if (!started?.ok) {
+        sendResponse({ ok: false, error: "Could not start autofill on this tab. Reload the page and try again." });
+        return;
+      }
       sendResponse({ ok: true });
     })();
 
