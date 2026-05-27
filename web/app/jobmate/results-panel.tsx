@@ -77,7 +77,7 @@ function cardSummary(value: string): string {
   return `${oneLine.slice(0, 399)}…`;
 }
 
-function ContactsModal(props: {
+export function ContactsModal(props: {
   job: ResultJobRow;
   linkedinLinks: string[];
   hiringContacts: string[];
@@ -138,7 +138,7 @@ function ContactsModal(props: {
   );
 }
 
-function JobResultCard(props: {
+export function JobResultCard(props: {
   job: ResultJobRow;
   selected: boolean;
   onToggleSelect: () => void;

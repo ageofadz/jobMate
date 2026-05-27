@@ -46,13 +46,6 @@ export function PreferenceEditorModal(props: {
   const [keywordSeedRaw, setKeywordSeedRaw] = useState(() =>
     initial?.keyword_seed ? JSON.parse(String(initial.keyword_seed)).join(", ") : ""
   );
-  const [contextBlock, setContextBlock] = useState(() => String(initial?.context_block ?? ""));
-  const [timezone, setTimezone] = useState(() => String(initial?.timezone ?? ""));
-  const [scheduleHourRaw, setScheduleHourRaw] = useState(() =>
-    initial?.schedule_hour_local !== undefined && initial?.schedule_hour_local !== null
-      ? String(initial.schedule_hour_local)
-      : ""
-  );
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -64,10 +57,7 @@ export function PreferenceEditorModal(props: {
       title,
       locations: splitLocations(locationsRaw),
       boardDomains: boardDomainsFromOptionIds(boardOptionIds),
-      keywordSeed: keywordSeedRaw ? splitComma(keywordSeedRaw) : [],
-      contextBlock,
-      timezone,
-      scheduleHourLocal: Number(scheduleHourRaw)
+      keywordSeed: keywordSeedRaw ? splitComma(keywordSeedRaw) : []
     });
 
     if (!parsed.success) {
@@ -85,8 +75,8 @@ export function PreferenceEditorModal(props: {
         await sqlite.run(
           `INSERT INTO preferences (
             id, user_id, title, enabled, locations, board_domains, keyword_seed, generated_keywords,
-            search_queries, search_after_days, context_block, timezone, schedule_hour_local, resume_asset_id, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            search_queries, search_after_days, context_block, timezone, schedule_hour_local, google_jobs_url, resume_asset_id, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             id,
             userId,
@@ -101,6 +91,7 @@ export function PreferenceEditorModal(props: {
             enriched.contextBlock,
             enriched.timezone,
             enriched.scheduleHourLocal,
+            null,
             null,
             now,
             now
@@ -126,6 +117,7 @@ export function PreferenceEditorModal(props: {
             context_block = ?,
             timezone = ?,
             schedule_hour_local = ?,
+            google_jobs_url = ?,
             resume_asset_id = ?,
             updated_at = ?
           WHERE id = ? AND user_id = ?`,
@@ -140,6 +132,7 @@ export function PreferenceEditorModal(props: {
             enriched.contextBlock,
             enriched.timezone,
             enriched.scheduleHourLocal,
+            null,
             null,
             now,
             prefId,
@@ -188,24 +181,6 @@ export function PreferenceEditorModal(props: {
               Keyword seeds (comma-separated)
             </label>
             <input id="pe-kw" className={ic()} value={keywordSeedRaw} onChange={(ev) => setKeywordSeedRaw(ev.target.value)} />
-          </div>
-          <div>
-            <label className={lc()} htmlFor="pe-ctx">
-              Extra context for answers (optional)
-            </label>
-            <textarea id="pe-ctx" rows={3} className={ic()} value={contextBlock} onChange={(ev) => setContextBlock(ev.target.value)} />
-          </div>
-          <div>
-            <label className={lc()} htmlFor="pe-tz">
-              Timezone (IANA)
-            </label>
-            <input id="pe-tz" className={ic()} value={timezone} onChange={(ev) => setTimezone(ev.target.value)} />
-          </div>
-          <div>
-            <label className={lc()} htmlFor="pe-sh">
-              Schedule hour local (0–23)
-            </label>
-            <input id="pe-sh" inputMode="numeric" className={ic()} value={scheduleHourRaw} onChange={(ev) => setScheduleHourRaw(ev.target.value)} />
           </div>
           {submitError ? <p className="text-sm text-red-600 dark:text-red-400">{submitError}</p> : null}
           <div className="flex gap-2 pt-2">

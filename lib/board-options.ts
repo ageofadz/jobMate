@@ -9,7 +9,8 @@ export const JOB_BOARD_OPTIONS: JobBoardOption[] = [
   { id: "greenhouse", label: "Greenhouse", domain: "boards.greenhouse.io" },
   { id: "workatastartup", label: "Work at a Startup", domain: "workatastartup.com" },
   { id: "jobteaser", label: "JobTeaser", domain: "jobteaser.com" },
-  { id: "smartrecruiters", label: "SmartRecruiters", domain: "smartrecruiters.com" }
+  { id: "smartrecruiters", label: "SmartRecruiters", domain: "smartrecruiters.com" },
+  { id: "googlejobs", label: "Google Jobs", domain: "google.com" }
 ];
 
 export const DEFAULT_BOARD_DOMAINS = JOB_BOARD_OPTIONS.map((o) => o.domain);

@@ -1,9 +1,16 @@
 {
   "manifest_version": 3,
-  "name": "JobMate Form Filler",
-  "version": "0.9.2",
-  "description": "In-browser Google job search, JobMate apply autofill, and API proxy for localhost.",
-  "permissions": ["tabs", "scripting", "storage"],
+  "name": "JobMate",
+  "version": "1.0.0",
+  "description": "Agentic browser assistant. Give it tasks, it figures out the rest.",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "JobMate"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "permissions": ["tabs", "scripting", "storage", "unlimitedStorage", "tabGroups", "sidePanel"],
   "host_permissions": ["<all_urls>", "http://localhost/*", "http://127.0.0.1/*", "https://localhost/*", "https://127.0.0.1/*", "https://www.google.com/*"],
   "background": {
     "service_worker": "background.js"

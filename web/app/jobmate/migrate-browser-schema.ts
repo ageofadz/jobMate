@@ -47,6 +47,7 @@ export function migrateBrowserApplicationSchema(db: SqlJsDatabase) {
   db.run(`UPDATE users SET current_location = location WHERE current_location IS NULL AND location IS NOT NULL`);
   ensureColumn(db, "preferences", "enabled", "enabled INTEGER NOT NULL DEFAULT 1");
   ensureColumn(db, "preferences", "search_after_days", "search_after_days INTEGER NOT NULL DEFAULT 14");
+  ensureColumn(db, "preferences", "google_jobs_url", "google_jobs_url TEXT");
   ensureColumn(db, "jobs", "compensation_range", "compensation_range TEXT");
   ensureColumn(db, "jobs", "company_homepage", "company_homepage TEXT");
   ensureColumn(db, "jobs", "linkedin_links", "linkedin_links TEXT NOT NULL DEFAULT '[]'");

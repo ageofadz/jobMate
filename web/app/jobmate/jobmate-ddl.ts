@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS preferences (
   context_block TEXT NOT NULL,
   timezone TEXT NOT NULL,
   schedule_hour_local INTEGER NOT NULL,
+  google_jobs_url TEXT,
   resume_asset_id TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,

@@ -4,6 +4,773 @@ function sleep(ms) {
 
 const applySessionByTabId = new Map();
 const applyAutomationTabByPayload = new Map();
+const internalSessionJobData = new Map();
+
+// ── Sidebar port ────────────────────────────────────────────────────────────
+
+let sidePanelPort = null;
+
+chrome.runtime.onConnect.addListener((p) => {
+  if (p.name !== "sidepanel") return;
+  sidePanelPort = p;
+  p.onDisconnect.addListener(() => { sidePanelPort = null; });
+  p.onMessage.addListener((msg) => handleSidePanelMessage(msg));
+  pushToSidePanel({ type: "TASKS_SNAPSHOT", tasks: getAllTasksForSidebar() });
+});
+
+function pushToSidePanel(msg) {
+  if (!sidePanelPort) return;
+  try { sidePanelPort.postMessage(msg); } catch {}
+}
+
+// ── Task system ─────────────────────────────────────────────────────────────
+
+const tasksById = new Map();
+
+function createTask(title, type, steps = []) {
+  const id = crypto.randomUUID();
+  const task = {
+    id,
+    title,
+    type,
+    status: "pending",
+    statusText: "Starting…",
+    steps: steps.map((label) => ({ label, status: "pending" })),
+    groupId: null,
+    createdAt: Date.now()
+  };
+  tasksById.set(id, task);
+  pushToSidePanel({ type: "TASK_UPDATE", task: serializeTask(task) });
+  return task;
+}
+
+function updateTask(id, patch) {
+  const task = tasksById.get(id);
+  if (!task) return;
+  Object.assign(task, patch);
+  pushToSidePanel({ type: "TASK_UPDATE", task: serializeTask(task) });
+}
+
+function setTaskStep(taskId, stepLabel, stepStatus) {
+  const task = tasksById.get(taskId);
+  if (!task) return;
+  const step = task.steps.find((s) => s.label === stepLabel);
+  if (step) step.status = stepStatus;
+  pushToSidePanel({ type: "TASK_UPDATE", task: serializeTask(task) });
+}
+
+function serializeTask(task) {
+  return {
+    id: task.id,
+    title: task.title,
+    status: task.status,
+    statusText: task.statusText,
+    steps: task.steps.map((s) => ({ label: s.label, status: s.status })),
+    groupId: task.groupId
+  };
+}
+
+function getAllTasksForSidebar() {
+  return [...tasksById.values()].map(serializeTask);
+}
+
+// ── Tab groups ───────────────────────────────────────────────────────────────
+
+async function createTaskTabGroup(title, color = "blue") {
+  const dummy = await chrome.tabs.create({ url: "about:blank", active: false });
+  const groupId = await chrome.tabs.group({ tabIds: [dummy.id] });
+  await chrome.tabGroups.update(groupId, { title, color, collapsed: false });
+  await chrome.tabs.remove(dummy.id);
+  return groupId;
+}
+
+async function addTabToGroup(tabId, groupId) {
+  await chrome.tabs.group({ tabIds: [tabId], groupId }).catch(() => {});
+}
+
+async function openTabInGroup(url, groupId, active = false) {
+  const tab = await chrome.tabs.create({ url, active });
+  if (groupId != null) {
+    await addTabToGroup(tab.id, groupId).catch(() => {});
+  }
+  return tab;
+}
+
+// ── Sidebar message handler ─────────────────────────────────────────────────
+
+function handleSidePanelMessage(msg) {
+  if (!msg?.type) return;
+
+  if (msg.type === "SIDEPANEL_READY") {
+    pushToSidePanel({ type: "TASKS_SNAPSHOT", tasks: getAllTasksForSidebar() });
+    return;
+  }
+
+  if (msg.type === "TASK_SUBMIT") {
+    handleTaskSubmit(String(msg.text || "").trim());
+    return;
+  }
+
+  if (msg.type === "TASK_DISMISS") {
+    const taskId = String(msg.taskId || "");
+    tasksById.delete(taskId);
+    pushToSidePanel({ type: "TASK_REMOVED", taskId });
+    return;
+  }
+
+  if (msg.type === "CLARIFY_REPLY") {
+    const resolver = pendingClarifyResolvers.get(msg.clarifyId);
+    if (resolver) {
+      pendingClarifyResolvers.delete(msg.clarifyId);
+      resolver(String(msg.reply || ""));
+    }
+    return;
+  }
+
+  if (msg.type === "CALLOUT_REPLY") {
+    const resolver = pendingCalloutResolvers.get(msg.taskId);
+    if (resolver) {
+      pendingCalloutResolvers.delete(msg.taskId);
+      resolver(msg.reply ?? null);
+    }
+    return;
+  }
+}
+
+// ── Clarify / callout awaitable helpers ──────────────────────────────────────
+
+const pendingClarifyResolvers = new Map();
+const pendingCalloutResolvers = new Map();
+
+function askClarify(question) {
+  const clarifyId = crypto.randomUUID();
+  return new Promise((resolve) => {
+    pendingClarifyResolvers.set(clarifyId, resolve);
+    pushToSidePanel({ type: "CLARIFY_REQUEST", clarifyId, question });
+  });
+}
+
+function requestCallout(taskId, msg) {
+  return new Promise((resolve) => {
+    pendingCalloutResolvers.set(taskId, resolve);
+    pushToSidePanel({ type: "CALLOUT", taskId, ...msg });
+  });
+}
+
+// ── Site tool memory ─────────────────────────────────────────────────────────
+
+function siteToolKey(hostname) {
+  return `siteTool:${hostname.replace(/^www\./, "")}`;
+}
+
+async function getSiteTool(hostname) {
+  const key = siteToolKey(hostname);
+  const result = await new Promise((resolve) => chrome.storage.local.get([key], resolve));
+  return result[key] ?? null;
+}
+
+async function saveSiteTool(hostname, tool) {
+  const key = siteToolKey(hostname);
+  await new Promise((resolve) => chrome.storage.local.set({ [key]: tool }, resolve));
+}
+
+async function recordSiteToolStep(hostname, step) {
+  const existing = await getSiteTool(hostname) ?? { hostname, steps: [], successCount: 0, failCount: 0, updatedAt: 0 };
+  existing.steps.push(step);
+  existing.updatedAt = Date.now();
+  await saveSiteTool(hostname, existing);
+}
+
+async function markSiteToolSuccess(hostname) {
+  const existing = await getSiteTool(hostname);
+  if (!existing) return;
+  existing.successCount = (existing.successCount || 0) + 1;
+  existing.lastUsed = Date.now();
+  await saveSiteTool(hostname, existing);
+}
+
+async function markSiteToolFailed(hostname) {
+  const existing = await getSiteTool(hostname);
+  if (!existing) return;
+  existing.failCount = (existing.failCount || 0) + 1;
+  if (existing.failCount > 2 && existing.failCount > existing.successCount) {
+    existing.steps = [];
+  }
+  await saveSiteTool(hostname, existing);
+}
+
+// ── LLM task planner ─────────────────────────────────────────────────────────
+
+async function planTask(userText, cfg) {
+  const apiKey = cfg.geminiApiKey?.trim();
+  if (!apiKey) return null;
+
+  const contextSnippet = (cfg.contextBlock || "").slice(0, 1200);
+  const prompt = [
+    "You are an agentic browser assistant planner.",
+    "Given a user task, return a short JSON plan.",
+    "Shape: {\"title\":\"...\",\"needsClarify\":false,\"clarifyQuestion\":\"\",\"steps\":[{\"label\":\"...\",\"type\":\"navigate|search|fill|click|email|read\",\"detail\":\"...\"}]}",
+    "title: short task title (max 60 chars).",
+    "needsClarify: true only if the task is critically ambiguous and one quick question would resolve it.",
+    "clarifyQuestion: the single most important clarifying question if needsClarify is true, otherwise empty string.",
+    "steps: 2 to 6 concrete steps. Each step has a label (short, shown in UI) and detail (instructions for the agent).",
+    "Do not ask for information that is already in the candidate context.",
+    "Return valid JSON only.",
+    contextSnippet ? `Candidate context:\n${contextSnippet}` : "",
+    `User task: ${userText}`
+  ].filter(Boolean).join("\n\n");
+
+  try {
+    const raw = await callGeminiExt([{ text: prompt }], apiKey, cfg.geminiModel?.trim() || GEMINI_FALLBACK_MODELS[0], true);
+    const parsed = parseJsonObjectExt(raw);
+    return parsed;
+  } catch {
+    return { title: userText.slice(0, 60), needsClarify: false, clarifyQuestion: "", steps: [{ label: "Run task", type: "navigate", detail: userText }] };
+  }
+}
+
+// ── Task submission entry point ───────────────────────────────────────────────
+
+async function handleTaskSubmit(text) {
+  if (!text) return;
+
+  const cfg = await getExtensionConfig();
+
+  if (!cfg.geminiApiKey?.trim()) {
+    pushToSidePanel({
+      type: "CALLOUT",
+      taskId: "cfg",
+      kind: "warn",
+      label: "Setup required",
+      message: "Add your Gemini API key in Settings before running tasks.",
+      instruction: "",
+      hasInput: false,
+      buttonLabel: "OK"
+    });
+    pendingCalloutResolvers.set("cfg", () => {});
+    return;
+  }
+
+  const plan = await planTask(text, cfg);
+  if (!plan) return;
+
+  let resolvedText = text;
+
+  if (plan.needsClarify && plan.clarifyQuestion) {
+    const answer = await askClarify(plan.clarifyQuestion);
+    resolvedText = `${text}\n\nAdditional context: ${answer}`;
+    const revisedPlan = await planTask(resolvedText, cfg);
+    if (revisedPlan) Object.assign(plan, revisedPlan);
+  }
+
+  const stepLabels = (plan.steps || []).map((s) => s.label);
+  const task = createTask(plan.title || text.slice(0, 60), "general", stepLabels);
+
+  const color = detectTaskColor(plan.steps || []);
+  const groupTitle = (plan.title || text).slice(0, 40);
+  const groupId = await createTaskTabGroup(groupTitle, color).catch(() => null);
+  updateTask(task.id, { groupId, status: "running", statusText: "Running…" });
+
+  runTaskPlan(task, plan.steps || [], cfg, groupId, resolvedText).catch((err) => {
+    updateTask(task.id, { status: "error", statusText: String(err?.message || err) });
+  });
+}
+
+function detectTaskColor(steps) {
+  const types = steps.map((s) => s.type);
+  if (types.includes("email")) return "yellow";
+  if (types.includes("search")) return "blue";
+  if (types.includes("fill")) return "green";
+  return "cyan";
+}
+
+async function runTaskPlan(task, steps, cfg, groupId, originalText) {
+  for (const step of steps) {
+    setTaskStep(task.id, step.label, "active");
+    updateTask(task.id, { statusText: step.label });
+
+    try {
+      await executeStep(task, step, cfg, groupId);
+      setTaskStep(task.id, step.label, "done");
+    } catch (err) {
+      setTaskStep(task.id, step.label, "error");
+      updateTask(task.id, { status: "waiting", statusText: `Stuck: ${err.message}` });
+
+      const reply = await requestCallout(task.id, {
+        kind: "warn",
+        label: "Needs help",
+        message: `Stuck on: ${step.label}`,
+        instruction: err.message,
+        hasInput: true,
+        inputPlaceholder: "Describe how to continue, or leave blank to skip…",
+        buttonLabel: "Continue"
+      });
+
+      updateTask(task.id, { status: "running", statusText: "Continuing…" });
+      if (reply) {
+        try {
+          await executeStep(task, { ...step, detail: reply }, cfg, groupId);
+          setTaskStep(task.id, step.label, "done");
+        } catch {}
+      }
+    }
+  }
+
+  updateTask(task.id, { status: "done", statusText: "Done." });
+  pushToSidePanel({ type: "CALLOUT_CLEAR" });
+}
+
+async function executeStep(task, step, cfg, groupId) {
+  const type = step.type || "navigate";
+
+  if (type === "search") {
+    await executeSearchStep(task, step, cfg, groupId);
+    return;
+  }
+
+  if (type === "fill" || type === "navigate") {
+    await executeApplyStep(task, step, cfg, groupId);
+    return;
+  }
+
+  if (type === "email") {
+    await executeEmailStep(task, step, cfg, groupId);
+    return;
+  }
+
+  await executeApplyStep(task, step, cfg, groupId);
+}
+
+async function executeSearchStep(task, step, cfg, groupId) {
+  const query = step.detail || step.label;
+  const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
+  const tab = await openTabInGroup(searchUrl, groupId, false);
+  await waitTabComplete(tab.id, 30000).catch(() => {});
+}
+
+async function executeApplyStep(task, step, cfg, groupId) {
+  const url = extractUrl(step.detail) || extractUrl(step.label);
+  if (!url) return;
+
+  const sessionId = crypto.randomUUID();
+  const sessionKey = `ext://session/${sessionId}`;
+  internalSessionJobData.set(sessionKey, {
+    applyUrl: url, title: task.title, company: "", listingText: step.detail || "",
+    jobId: task.id, linkedinLinks: [], hiringContacts: [], coverLetterText: ""
+  });
+
+  const u = new URL(url);
+  u.hash = `jobmateSession=${encodeURIComponent(sessionId)}`;
+
+  const tab = await openTabInGroup(u.toString(), groupId, false);
+  applyAutomationTabByPayload.set(sessionKey, tab.id);
+  setApplySession(tab.id, sessionKey, null);
+}
+
+async function executeEmailStep(task, step, cfg, groupId) {
+  const tab = await openTabInGroup("https://mail.google.com/mail/u/0/#inbox", groupId, true);
+  await waitTabComplete(tab.id, 30000).catch(() => {});
+  await requestCallout(task.id, {
+    kind: "info",
+    label: "Email",
+    message: "Gmail is open in the tab group. Complete the email task, then click Continue.",
+    instruction: step.detail || "",
+    hasInput: false,
+    buttonLabel: "Continue"
+  });
+}
+
+function extractUrl(text) {
+  if (!text) return null;
+  try {
+    const match = text.match(/https?:\/\/[^\s"']+/);
+    return match ? new URL(match[0]).toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+const GEMINI_FALLBACK_MODELS = ["gemini-3.1-flash-lite", "gemini-2-flash", "gemini-2.5-flash"];
+
+const COMPENSATION_PROMPT_LINES = [
+  "For desired salary, compensation expectation, salary range, pay, rate, or minimum compensation fields, analyze the listing's posted compensation and the candidate's preferred compensation range from the candidate context.",
+  "If the listing includes compensation, answer with a concise value or range inside the overlap between the posted range and the candidate's preferred range.",
+  "If there is overlap and the candidate is a strong fit, lean toward the upper half of that overlap.",
+  "If the listing does not include compensation, answer from the candidate's preferred compensation range.",
+  "Do not leave required compensation fields empty when the candidate context contains a preferred compensation range."
+];
+
+function parseJsonObjectExt(text) {
+  const trimmed = text.trim();
+  if (!trimmed) throw new Error("Empty LLM output.");
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidate = fenced?.[1]?.trim() ?? trimmed;
+  try { return JSON.parse(candidate); } catch {}
+  const start = candidate.indexOf("{");
+  if (start < 0) throw new Error("LLM output did not contain a JSON object.");
+  let depth = 0, inStr = false, escape = false;
+  for (let i = start; i < candidate.length; i++) {
+    const ch = candidate[i];
+    if (escape) { escape = false; continue; }
+    if (ch === "\\") { escape = true; continue; }
+    if (ch === '"') { inStr = !inStr; continue; }
+    if (inStr) continue;
+    if (ch === "{") depth++;
+    else if (ch === "}") { depth--; if (depth === 0) return JSON.parse(candidate.slice(start, i + 1)); }
+  }
+  throw new Error("LLM output did not contain a complete JSON object.");
+}
+
+function getExtensionConfig() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(
+      ["geminiApiKey", "geminiModel", "candidateName", "candidateEmail", "contextBlock", "writingSample", "coverLetterTemplate", "resumePdfBase64", "resumePdfFilename", "resumePdfMimeType"],
+      resolve
+    );
+  });
+}
+
+async function callGeminiExt(parts, apiKey, primaryModel, json = false) {
+  const models = [...new Set([primaryModel || GEMINI_FALLBACK_MODELS[0], ...GEMINI_FALLBACK_MODELS])];
+  let lastError = "";
+  for (const model of models) {
+    let res = null;
+    try {
+      res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+        {
+          method: "POST",
+          headers: { "x-goog-api-key": apiKey, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ role: "user", parts }],
+            generationConfig: json ? { responseMimeType: "application/json" } : undefined
+          })
+        }
+      );
+    } catch (err) { lastError = String(err.message || err); continue; }
+    if (!res.ok) {
+      const txt = await res.text().catch(() => "");
+      lastError = `${model}: ${res.status}${txt ? " " + txt.slice(0, 300) : ""}`;
+      continue;
+    }
+    const payload = await res.json();
+    const text = payload.candidates?.flatMap((c) => c.content?.parts ?? []).map((p) => p.text ?? "").join("") ?? "";
+    if (text.trim()) return text;
+    lastError = `${model}: empty response`;
+  }
+  throw new Error(`Gemini request failed. ${lastError}`);
+}
+
+function getSessionJobData(tabId) {
+  const session = getApplySession(tabId);
+  const payloadUrl = session?.payloadUrl ?? "";
+  return payloadUrl ? (internalSessionJobData.get(payloadUrl) ?? {}) : {};
+}
+
+async function generateCoverLetterExt(config, jobData, pageLanguage) {
+  const apiKey = config.geminiApiKey?.trim();
+  if (!apiKey) return "";
+  const model = config.geminiModel?.trim() || GEMINI_FALLBACK_MODELS[0];
+  const lang = pageLanguage?.trim().toLowerCase() || "en";
+  const hasPdf = Boolean(config.resumePdfBase64);
+  const prompt = [
+    "Write a short application note for this job. This is not a formal cover letter.",
+    "Goal: sound like a real person briefly explaining why this role makes sense for them.",
+    "Reference specifics from the listing if possible. Be specific, direct, and slightly understated.",
+    "Hard constraints: 2 to 3 short paragraphs only. 120 to 220 words total. No bullets. Plain text only.",
+    lang && lang !== "en" ? `Write the entire note in the language with BCP-47 code: ${lang}. Do not use English unless that code is en.` : "Write the entire note in English.",
+    "Address it to 'Hi team,' unless a specific contact is provided.",
+    "Use plain ASCII punctuation only. No em dashes, en dashes, curly quotes, bullets, or special symbols.",
+    "Do not invent employers, degrees, dates, metrics, locations, titles, clients, or domain experience.",
+    "Use the candidate writing sample as the style reference.",
+    "Prefer simple, concrete sentences. Avoid polished corporate language.",
+    "Do not use: 'I am excited to apply', 'I am confident I can contribute', 'leverage my background', 'passionate about', 'perfect fit', 'unique opportunity', 'I look forward to'.",
+    "Start with the actual reason the role is interesting, based on the job listing.",
+    "Connect 1 or 2 specific pieces of the candidate's real experience to the role.",
+    "Mention the company name at most once. Mention the role title at most once.",
+    jobData.listingText ? `Job listing:\n${jobData.listingText.slice(0, 8000)}` : "",
+    config.contextBlock ? `Candidate context:\n${config.contextBlock}` : "",
+    !hasPdf && config.writingSample ? `Candidate writing sample:\n${config.writingSample}` : "",
+    config.coverLetterTemplate ? `Template to follow:\n${config.coverLetterTemplate}` : ""
+  ].filter(Boolean).join("\n\n");
+  const parts = [{ text: prompt }];
+  if (hasPdf && config.resumePdfBase64) {
+    parts.push({ inline_data: { mime_type: config.resumePdfMimeType || "application/pdf", data: config.resumePdfBase64 } });
+  }
+  try {
+    const raw = await callGeminiExt(parts, apiKey, model, false);
+    return raw.replace(/\r\n?/g, "\n").replace(/[^\x09\x0a\x0d\x20-\x7e]/g, "").replace(/\n{3,}/g, "\n\n").trim();
+  } catch { return ""; }
+}
+
+async function generateFormAnswersExt(tabId, fields, retryNote, pageLanguage) {
+  if (!fields.length) return { answers: [], resumeFieldIds: [], coverLetterText: "", coverUpload: null };
+  const config = await getExtensionConfig();
+  const apiKey = config.geminiApiKey?.trim();
+  if (!apiKey) throw new Error("No Gemini API key configured. Open the extension popup → Settings and add your key.");
+  const model = config.geminiModel?.trim() || GEMINI_FALLBACK_MODELS[0];
+  const session = getApplySession(tabId);
+  const payloadUrl = session?.payloadUrl ?? "";
+  const jobData = payloadUrl ? (internalSessionJobData.get(payloadUrl) ?? {}) : {};
+  const hasPdf = Boolean(config.resumePdfBase64);
+  const contextBlock = config.contextBlock || "";
+  const writingSample = config.writingSample || "";
+  const listingText = jobData.listingText || "";
+  let coverLetterText = jobData.coverLetterText || "";
+
+  const hasCoverLetterField = fields.some((f) =>
+    f.type === "textarea" ||
+    /cover.?letter|motivation|letter of interest|supporting statement|message to (the )?(hiring|recruitment|team)|why.*(join|apply|interested|challenge)/i.test(f.label)
+  );
+
+  if (hasCoverLetterField && !coverLetterText) {
+    try {
+      coverLetterText = await generateCoverLetterExt(config, jobData, pageLanguage);
+      if (payloadUrl) {
+        internalSessionJobData.set(payloadUrl, { ...(internalSessionJobData.get(payloadUrl) ?? {}), coverLetterText });
+      }
+    } catch {}
+  }
+
+  const prompt = [
+    "You are filling a job application form.",
+    "You will receive the entire visible form as JSON. Each field has a fieldId. Return answers keyed by the same fieldId.",
+    "Read every field label literally. Do not move an answer from one field to another.",
+    "For every answer, first identify what that exact field label is asking. The answer must fit that exact field label and its options.",
+    "You must return exactly one answers item for every field in Fields JSON.",
+    "Every field must receive an answer. Never leave a required field empty.",
+    hasPdf
+      ? "For required fields, an empty answer is invalid. Use the candidate context and the attached resume PDF to answer them."
+      : "For required fields, an empty answer is invalid. Use the candidate context and resume to answer them.",
+    hasPdf
+      ? "Identity fields are mandatory: Full name must use the candidate name. Email and any confirm-email field must use the candidate email. Phone must use the candidate phone if present in context or resume PDF."
+      : "Identity fields are mandatory: Full name must use the candidate name. Email and any confirm-email field must use the candidate email. Phone must use the candidate phone if present in context or resume.",
+    "If a field asks about visa sponsorship, work authorization, or legal right to work, answer truthfully from candidate context and choose the closest matching option.",
+    "If a field asks for a cover letter, motivation letter, letter of interest, or supporting statement, use the provided cover letter tool.",
+    "If a field asks for a message to the recruitment or hiring team, what motivates the candidate, why they want to join, or why this role is their next challenge, use the provided cover letter tool.",
+    "If a field is asking why the candidate would be a strong addition to the team or culture, answer as a culture-fit question focused on soft skills, not technical experience, unless the field clearly asks for a long motivation statement.",
+    "For culture-fit questions, use the candidate writing sample as the style reference when one is provided.",
+    "Never return a filename, file path, or PDF name as an answer.",
+    "For file-type fields: if the field is asking for a resume, CV, curriculum vitae, or equivalent, return exactly \"__resume__\". If asking for a cover letter or motivation letter, return exactly \"__cover_letter__\". For any other file field, return an empty string.",
+    "Never use the cover letter text for location, source/how-heard, authorization, short answer, URL, or phone fields unless the field clearly asks for a long written statement.",
+    "If a field asks for current location/city/state, answer only the location value, for example 'Chicago, IL'. Under 80 characters.",
+    "If a field asks how the candidate heard about the job, answer exactly 'Google'.",
+    "Determine the field's intent semantically from its label, key, type, and options, not by keyword matching alone.",
+    "If a field asks for a URL, answer only a URL. For LinkedIn, GitHub, personal website, Twitter/X: answer the candidate's URL for that network if present in context, otherwise leave empty.",
+    "For optional demographic/self-identification fields, choose the opt-out option when one exists; otherwise answer truthfully from context.",
+    "For required demographic/self-identification choice fields, choose the option label equivalent to 'I do not wish to answer', 'Decline to self-identify', 'Prefer not to say', or 'I don't want to answer'.",
+    "For radio, checkbox, and select fields, answer using option labels from that field's options.",
+    "For required radio, checkbox, and select fields, you must choose the best available option.",
+    ...COMPENSATION_PROMPT_LINES,
+    "Use normal capitalization. Be concise, concrete, and truthful.",
+    "Return valid JSON only with shape {\"answers\":[{\"fieldId\":\"\",\"answer\":\"\",\"reasoning\":\"\"}]}.",
+    retryNote ? `Critical retry note:\n${retryNote}` : "",
+    `Fields JSON:\n${JSON.stringify(fields)}`,
+    contextBlock ? `Candidate context:\n${contextBlock}` : "",
+    !hasPdf ? "" : "",
+    coverLetterText ? `Cover letter text:\n${coverLetterText}` : "",
+    writingSample ? `Candidate writing sample:\n${writingSample.slice(0, 6000)}` : "",
+    listingText ? `Job listing text:\n${listingText.slice(0, 8000)}` : ""
+  ].filter(Boolean).join("\n\n");
+
+  const parts = [{ text: prompt }];
+  if (hasPdf && config.resumePdfBase64) {
+    parts.push({ inline_data: { mime_type: config.resumePdfMimeType || "application/pdf", data: config.resumePdfBase64 } });
+  }
+
+  const raw = await callGeminiExt(parts, apiKey, model, true);
+  const parsed = parseJsonObjectExt(raw);
+  const validFieldIds = new Set(fields.map((f) => f.fieldId));
+  const resumeFieldIds = [];
+  const answers = [];
+
+  for (const item of parsed.answers ?? []) {
+    const fieldId = String(item.fieldId ?? "");
+    if (!validFieldIds.has(fieldId)) continue;
+    const answer = String(item.answer ?? "");
+    if (answer === "__resume__") {
+      resumeFieldIds.push(fieldId);
+      answers.push({ fieldId, answer: "", reasoning: item.reasoning ?? "" });
+    } else {
+      answers.push({ fieldId, answer: answer === "__cover_letter__" ? "" : answer, reasoning: item.reasoning ?? "Answered from whole-form field dump." });
+    }
+  }
+
+  const covUpload = null;
+  return { ok: true, answers, resumeFieldIds, coverLetterText, coverUpload: covUpload };
+}
+
+const applyPageUrlOscillationByTab = new Map();
+
+function normalizeApplyPageUrl(url) {
+  try {
+    const parsed = new URL(url);
+    parsed.hash = "";
+    return `${parsed.origin}${parsed.pathname.replace(/\/+$/, "") || "/"}${parsed.search}`;
+  } catch {
+    return String(url || "").trim();
+  }
+}
+
+function recordApplyPageUrlOscillation(tabId, pageUrl) {
+  const u = normalizeApplyPageUrl(pageUrl);
+  if (!u) return false;
+  let track = applyPageUrlOscillationByTab.get(tabId);
+  if (!track) {
+    track = { a: null, b: null, last: null, switches: 0 };
+    applyPageUrlOscillationByTab.set(tabId, track);
+  }
+  if (u === track.last) return track.switches >= 3;
+  if (!track.a) {
+    track.a = u;
+    track.last = u;
+    return false;
+  }
+  if (!track.b && u !== track.a) {
+    track.b = u;
+    track.last = u;
+    track.switches = 1;
+    return false;
+  }
+  if (u === track.a || u === track.b) {
+    track.switches += 1;
+    track.last = u;
+    return track.switches >= 3;
+  }
+  return false;
+}
+
+async function nextBrowserActionExt(tabId, pageData) {
+  const config = await getExtensionConfig();
+  const apiKey = config.geminiApiKey?.trim();
+  if (!apiKey) throw new Error("No Gemini API key configured.");
+  const model = config.geminiModel?.trim() || GEMINI_FALLBACK_MODELS[0];
+  const jobData = getSessionJobData(tabId);
+
+  const { pageUrl, pageText, stepIndex, history, hiddenApplyUrl, elements } = pageData;
+
+  if (recordApplyPageUrlOscillation(tabId, pageUrl)) {
+    return {
+      ok: true,
+      action: {
+        tool: "blocked",
+        elementId: null,
+        url: null,
+        text: null,
+        value: null,
+        reasoning:
+          "Stopped: the browser kept switching between the same two pages. Open the application page directly, then click Continue.",
+        coverLetterElementIds: [],
+        coverLetterRevealIds: [],
+        resumeElementIds: []
+      }
+    };
+  }
+  const targetApplyUrl = jobData.applyUrl || pageUrl;
+  const targetTitle = jobData.title || "";
+  const targetCompany = jobData.company || "";
+  const candidateEmail = config.candidateEmail?.trim() || "";
+
+  const pageHost = (() => {
+    try {
+      return new URL(pageUrl).hostname.replace(/^www\./i, "").toLowerCase();
+    } catch {
+      return "";
+    }
+  })();
+
+  const actions = (elements || [])
+    .filter((e) => e.type === "action")
+    .filter((e) => {
+      if (pageHost !== "workatastartup.com") return true;
+      const t = String(e.text || "").trim();
+      if (/^view job$/i.test(t)) return false;
+      if (e.href) {
+        try {
+          const targetPath = new URL(targetApplyUrl).pathname;
+          const hrefPath = new URL(resolveUrl(String(e.href), pageUrl)).pathname;
+          if (/\/jobs\/\d+/i.test(targetPath) && /\/companies\//i.test(hrefPath)) return false;
+        } catch {}
+      }
+      return true;
+    });
+  const fields = (elements || []).filter((e) => e.type === "field");
+  const validElementIds = new Set([...actions.map((e) => e.elementId), ...fields.map((e) => e.elementId)]);
+
+  function resolveUrl(url, base) { try { return new URL(url, base).toString(); } catch { return ""; } }
+
+  const allowedUrls = new Set(
+    [targetApplyUrl, hiddenApplyUrl, ...actions.map((a) => a.href ?? "").map((u) => resolveUrl(u, pageUrl))].filter(Boolean)
+  );
+
+  function compactEl(e) {
+    const out = { id: e.elementId, tag: e.tag };
+    if (e.type === "action") {
+      if (e.text) out.text = e.text;
+      if (e.href) out.href = e.href;
+      if (e.context) out.ctx = String(e.context).slice(0, 120);
+    } else {
+      if (e.label) out.label = e.label;
+      if (e.fieldType) out.type = e.fieldType;
+      if (e.required) out.req = true;
+      if (e.options?.length) out.opts = e.options.slice(0, 12);
+    }
+    return out;
+  }
+
+  const compactActions = JSON.stringify(actions.map(compactEl));
+  const compactHistory = (history || []).slice(-5).map((h) => {
+    const out = { t: h.tool };
+    if (h.elementId) out.el = h.elementId;
+    if (h.url) out.url = h.url;
+    if (h.reasoning) out.r = String(h.reasoning).slice(0, 60);
+    return out;
+  });
+
+  const prompt = [
+    "Browser agent. Goal: reach the job application form for the target job listing by clicking Apply / Apply now / Continue application buttons.",
+    "Return ONE action as JSON, no other text.",
+    '{"tool":"navigate|click|wait|blocked","elementId":null,"url":null,"reasoning":""}',
+    "Tools: navigate(url) click(elementId) wait blocked",
+    "Rules: navigation only — the extension fills forms automatically | prefer Apply / Apply now / Start application clicks | never click profile, account, dashboard, saved jobs, or settings links | on auth pages click register/sign-in only when needed to continue applying",
+    pageHost === "workatastartup.com" ? 'WorkAtAStartup rule: never click \"View Job\" (it navigates back). If an Apply button exists, click Apply.' : "",
+    targetTitle ? `Target job: "${targetTitle}" at ${targetCompany}` : `Target: apply on current page`,
+    `Target listing URL: ${targetApplyUrl}`,
+    hiddenApplyUrl ? `Hidden apply URL: ${hiddenApplyUrl}` : "",
+    `Current page: ${pageUrl} | step: ${stepIndex}`,
+    compactHistory.length ? `History: ${JSON.stringify(compactHistory)}` : "",
+    `Allowed URLs: ${JSON.stringify([...allowedUrls])}`,
+    fields.length ? `FORM DETECTED (${fields.length} fields) — extension will fill automatically; click Apply only if this is not yet the application form` : "",
+    `PAGE:\n${String(pageText || "").slice(0, 2500)}`,
+    `CLICKABLE ELEMENTS:\n${compactActions}`
+  ].filter(Boolean).join("\n");
+
+  const raw = await callGeminiExt([{ text: prompt }], apiKey, model, true);
+  const parsed = parseJsonObjectExt(raw);
+
+  const toolRaw = String(parsed.tool ?? "");
+  const validTools = ["navigate", "click", "wait", "blocked"];
+  const tool = validTools.includes(toolRaw) ? toolRaw : "wait";
+
+  const elementIdRaw = parsed.elementId ? String(parsed.elementId) : "";
+  const elementId = validElementIds.has(elementIdRaw) ? elementIdRaw : null;
+
+  const urlRaw = parsed.url ? resolveUrl(String(parsed.url), pageUrl) : "";
+  let url = allowedUrls.has(urlRaw) ? urlRaw : null;
+  if (pageHost === "workatastartup.com" && url) {
+    try {
+      const targetPath = new URL(targetApplyUrl).pathname;
+      const navPath = new URL(url).pathname;
+      if (/\/jobs\/\d+/i.test(targetPath) && /\/companies\//i.test(navPath)) {
+        url = null;
+      }
+    } catch {}
+  }
+
+  const resolvedTool = tool === "navigate" && !url && elementId ? "click" : tool === "click" && !elementId && url ? "navigate" : tool;
+
+  return { ok: true, action: { tool: resolvedTool, elementId, url, text: null, value: null, reasoning: String(parsed.reasoning ?? ""), coverLetterElementIds: [], coverLetterRevealIds: [], resumeElementIds: [] } };
+}
 
 function getApplySession(tabId) {
   const entry = applySessionByTabId.get(tabId);
@@ -16,13 +783,23 @@ function setApplySession(tabId, payloadUrl, openerTabId) {
   applySessionByTabId.set(tabId, { payloadUrl, openerTabId: openerTabId ?? null });
 }
 
+chrome.action.onClicked.addListener((tab) => {
+  chrome.sidePanel.open({ windowId: tab.windowId }).catch(() => {});
+});
+
 chrome.tabs.onRemoved.addListener((tabId) => {
+  const session = getApplySession(tabId);
+  const notifyTabId = session?.openerTabId ?? null;
   applySessionByTabId.delete(tabId);
 
   for (const [payloadUrl, automationTabId] of applyAutomationTabByPayload.entries()) {
     if (automationTabId === tabId) {
       applyAutomationTabByPayload.delete(payloadUrl);
     }
+  }
+
+  if (notifyTabId) {
+    chrome.tabs.sendMessage(notifyTabId, { type: "JOBMATE_APPLY_CLOSED", tabId }).catch(() => {});
   }
 });
 
@@ -49,7 +826,7 @@ async function registerApplyAutomationTab(tabId, payloadUrl, uiTabId) {
   await chrome.tabs.update(tabId, { active: false }).catch(() => {});
 }
 
-async function openApplyAutomationTab(url, payloadUrl, uiTabId) {
+async function openApplyAutomationTab(url, payloadUrl, uiTabId, groupId = null) {
   const existingId = applyAutomationTabByPayload.get(payloadUrl);
 
   if (existingId) {
@@ -75,6 +852,16 @@ async function openApplyAutomationTab(url, payloadUrl, uiTabId) {
   applyAutomationTabByPayload.set(payloadUrl, tabId);
   setApplySession(tabId, payloadUrl, uiTabId);
   await chrome.tabs.update(tabId, { active: false }).catch(() => {});
+
+  if (groupId != null) {
+    await addTabToGroup(tabId, groupId).catch(() => {});
+  } else {
+    const newGroupId = await chrome.tabs.group({ tabIds: [tabId] }).catch(() => null);
+    if (newGroupId != null) {
+      await chrome.tabGroups.update(newGroupId, { title: "JobMate Apply", color: "green" }).catch(() => {});
+    }
+  }
+
   return tabId;
 }
 
@@ -110,30 +897,21 @@ chrome.tabs.onCreated.addListener((tab) => {
 });
 
 async function createIsolatedCrawlerTab(initialUrl = "about:blank") {
-  const createdWindow = await chrome.windows.create({
-    url: initialUrl,
-    focused: false,
-    type: "popup",
-    state: "minimized"
-  });
-  const tab = createdWindow.tabs?.[0];
+  const tab = await chrome.tabs.create({ url: initialUrl, active: false });
+  if (!tab?.id) throw new Error("Failed to create crawler tab.");
 
-  if (!tab?.id || !createdWindow.id) {
-    if (createdWindow.id) {
-      await chrome.windows.remove(createdWindow.id).catch(() => {});
-    }
-
-    throw new Error("Failed to create isolated crawler window.");
+  const groupId = await chrome.tabs.group({ tabIds: [tab.id] }).catch(() => null);
+  if (groupId != null) {
+    await chrome.tabGroups.update(groupId, { title: "JobMate Crawl", color: "grey", collapsed: true }).catch(() => {});
   }
 
-  return {
-    tabId: tab.id,
-    windowId: createdWindow.id
-  };
+  return { tabId: tab.id, windowId: tab.windowId, groupId };
 }
 
-async function closeIsolatedCrawlerWindow(windowId) {
-  await chrome.windows.remove(windowId).catch(() => {});
+async function closeIsolatedCrawlerWindow(windowId, tabId) {
+  if (tabId != null) {
+    await chrome.tabs.remove(tabId).catch(() => {});
+  }
 }
 
 function waitTabComplete(tabId, ms = 90000) {
@@ -756,7 +1534,7 @@ async function runGoogleBatch(queryList, limitPerQuery) {
       byQuery[query] = await scrapeQueryAllPages(crawler.tabId, query, limitPerQuery);
     }
   } finally {
-    await closeIsolatedCrawlerWindow(crawler.windowId);
+    await closeIsolatedCrawlerWindow(crawler.windowId, crawler.tabId);
   }
 
   return byQuery;
@@ -771,7 +1549,7 @@ async function runJobTeaserBatch(specs, limitPerSpec) {
       bySpecId[spec.id] = await scrapeJobTeaserSpec(crawler.tabId, spec, limitPerSpec);
     }
   } finally {
-    await closeIsolatedCrawlerWindow(crawler.windowId);
+    await closeIsolatedCrawlerWindow(crawler.windowId, crawler.tabId);
   }
 
   return bySpecId;
@@ -786,7 +1564,7 @@ async function runWorkAtAStartupBatch(specs, limitPerSpec) {
       bySpecId[spec.id] = await scrapeWorkAtAStartupSpec(crawler.tabId, spec, limitPerSpec);
     }
   } finally {
-    await closeIsolatedCrawlerWindow(crawler.windowId);
+    await closeIsolatedCrawlerWindow(crawler.windowId, crawler.tabId);
   }
 
   return bySpecId;
@@ -804,7 +1582,7 @@ async function fetchPageHtmlInHiddenTab(url) {
       html: snap.html || ""
     };
   } finally {
-    await closeIsolatedCrawlerWindow(crawler.windowId);
+    await closeIsolatedCrawlerWindow(crawler.windowId, crawler.tabId);
   }
 }
 
@@ -844,24 +1622,52 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg?.type === "JOBMATE_OPEN_APPLY_TAB") {
     (async () => {
-      const url = typeof msg.url === "string" ? msg.url.trim() : "";
-      const payloadUrl = typeof msg.payloadUrl === "string" ? msg.payloadUrl.trim() : "";
+      const applyUrl = typeof msg.url === "string" ? msg.url.trim() : "";
       const senderTabId = sender.tab?.id ?? null;
 
-      if (!url || !payloadUrl) {
+      if (!applyUrl) {
         sendResponse({ ok: false, error: "No URL" });
         return;
       }
 
+      let sessionUrl = applyUrl;
+      let sessionKey = typeof msg.payloadUrl === "string" ? msg.payloadUrl.trim() : "";
+
+      if (msg.sessionId) {
+        const sessionId = String(msg.sessionId);
+        sessionKey = `ext://session/${sessionId}`;
+        if (msg.jobData && typeof msg.jobData === "object") {
+          internalSessionJobData.set(sessionKey, {
+            applyUrl,
+            title: String(msg.jobData.title || ""),
+            company: String(msg.jobData.company || ""),
+            listingText: String(msg.jobData.listingText || ""),
+            jobId: String(msg.jobData.jobId || ""),
+            companyHomepage: String(msg.jobData.companyHomepage || ""),
+            linkedinLinks: Array.isArray(msg.jobData.linkedinLinks) ? msg.jobData.linkedinLinks.map(String) : [],
+            hiringContacts: Array.isArray(msg.jobData.hiringContacts) ? msg.jobData.hiringContacts.map(String) : [],
+            coverLetterText: ""
+          });
+        }
+        const u = new URL(applyUrl);
+        u.hash = `jobmateSession=${encodeURIComponent(sessionId)}`;
+        sessionUrl = u.toString();
+      }
+
+      if (!sessionKey) {
+        sendResponse({ ok: false, error: "No session key" });
+        return;
+      }
+
       try {
-        const tabId = await openApplyAutomationTab(url, payloadUrl, senderTabId);
+        const tabId = await openApplyAutomationTab(sessionUrl, sessionKey, senderTabId);
 
         if (senderTabId) {
           await chrome.tabs
             .sendMessage(senderTabId, {
               type: "JOBMATE_APPLY_STARTED",
               tabId,
-              applyUrl: url
+              applyUrl
             })
             .catch(() => {});
         }
@@ -947,6 +1753,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: true });
     })();
 
+    return true;
+  }
+
+  if (msg?.type === "JOBMATE_RESET_URL_OSCILLATION") {
+    const tabId = sender.tab?.id;
+    if (tabId) applyPageUrlOscillationByTab.delete(tabId);
+    sendResponse({ ok: true });
     return true;
   }
 
@@ -1119,6 +1932,128 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
     })();
 
+    return true;
+  }
+
+  if (msg?.type === "JOBMATE_ADHOC_FILL_REQUEST") {
+    (async () => {
+      const pageTabId = typeof msg.pageTabId === "number" ? msg.pageTabId : null;
+      const pageUrl = typeof msg.pageUrl === "string" ? msg.pageUrl.trim() : "";
+
+      if (!pageTabId || !pageUrl) {
+        sendResponse({ ok: false, error: "Missing tab info." });
+        return;
+      }
+
+      const cfg = await getExtensionConfig();
+      if (!cfg.geminiApiKey?.trim()) {
+        sendResponse({ ok: false, error: "Add a Gemini API key in the extension settings first." });
+        return;
+      }
+
+      const sessionId = crypto.randomUUID();
+      const sessionKey = `ext://session/${sessionId}`;
+      internalSessionJobData.set(sessionKey, {
+        applyUrl: pageUrl,
+        title: "", company: "", listingText: "", jobId: "",
+        companyHomepage: "", linkedinLinks: [], hiringContacts: [], coverLetterText: ""
+      });
+
+      await registerApplyAutomationTab(pageTabId, sessionKey, null);
+
+      let navigateUrl = pageUrl;
+      try {
+        const u = new URL(pageUrl);
+        u.hash = `jobmateSession=${encodeURIComponent(sessionId)}`;
+        navigateUrl = u.toString();
+      } catch {}
+
+      await chrome.tabs.update(pageTabId, { url: navigateUrl }).catch(() => {});
+      sendResponse({ ok: true });
+    })();
+
+    return true;
+  }
+
+  if (msg?.type === "JOBMATE_GET_PAYLOAD") {
+    (async () => {
+      const tabId = sender.tab?.id;
+      if (!tabId) { sendResponse({ ok: false, error: "No tab." }); return; }
+      const cfg = await getExtensionConfig();
+      const jobData = getSessionJobData(tabId);
+      const resumeUpload = cfg.resumePdfBase64
+        ? { name: cfg.resumePdfFilename || "resume.pdf", mimeType: cfg.resumePdfMimeType || "application/pdf", base64: cfg.resumePdfBase64 }
+        : null;
+      sendResponse({
+        ok: true,
+        payload: {
+          applyUrl: jobData.applyUrl || "",
+          title: jobData.title || "",
+          company: jobData.company || "",
+          jobId: jobData.jobId || "",
+          listingText: jobData.listingText || "",
+          coverLetterText: jobData.coverLetterText || "",
+          coverUpload: null,
+          resumeUpload,
+          candidateEmail: cfg.candidateEmail || "",
+          candidateFullName: cfg.candidateName || "",
+          linkedinLinks: jobData.linkedinLinks || [],
+          hiringContacts: jobData.hiringContacts || []
+        }
+      });
+    })();
+    return true;
+  }
+
+  if (msg?.type === "JOBMATE_FILL_ANSWERS") {
+    (async () => {
+      const tabId = sender.tab?.id;
+      if (!tabId) { sendResponse({ ok: false, error: "No tab." }); return; }
+      const fields = Array.isArray(msg.fields) ? msg.fields : [];
+      const retryNote = typeof msg.retryNote === "string" ? msg.retryNote : "";
+      const pageLanguage = typeof msg.pageLanguage === "string" ? msg.pageLanguage : "";
+      try {
+        const result = await generateFormAnswersExt(tabId, fields, retryNote || undefined, pageLanguage || undefined);
+        const session = getApplySession(tabId);
+        const payloadUrl = session?.payloadUrl ?? "";
+        if (result.coverLetterText && payloadUrl) {
+          const existing = internalSessionJobData.get(payloadUrl) ?? {};
+          internalSessionJobData.set(payloadUrl, { ...existing, coverLetterText: result.coverLetterText });
+        }
+        sendResponse(result);
+      } catch (err) {
+        sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      }
+    })();
+    return true;
+  }
+
+  if (msg?.type === "JOBMATE_ANALYZE_PAGE") {
+    (async () => {
+      const tabId = sender.tab?.id;
+      if (!tabId) { sendResponse({ ok: false, error: "No tab." }); return; }
+      try {
+        const result = await nextBrowserActionExt(tabId, msg);
+        sendResponse(result);
+      } catch (err) {
+        sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      }
+    })();
+    return true;
+  }
+
+  if (msg?.type === "JOBMATE_SESSION_COMPLETE") {
+    (async () => {
+      const tabId = sender.tab?.id;
+      const session = tabId ? getApplySession(tabId) : null;
+      const payloadUrl = session?.payloadUrl ?? "";
+      if (payloadUrl && payloadUrl.startsWith("ext://session/")) {
+        internalSessionJobData.delete(payloadUrl);
+      }
+      if (tabId) applySessionByTabId.delete(tabId);
+      if (payloadUrl) applyAutomationTabByPayload.delete(payloadUrl);
+      sendResponse({ ok: true });
+    })();
     return true;
   }
 

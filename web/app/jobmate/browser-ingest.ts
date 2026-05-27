@@ -16,6 +16,7 @@ import { searchGoogleListingsWithOrganicFetcher, type OrganicSearchResult } from
 
 import { enrichPreferenceInput, preferenceInputSchema, type PreferenceInput } from "./browser-preference";
 import { fetchGoogleOrganicViaExtensionBatch } from "./extension-google-batch";
+import { fetchGoogleJobsCandidatesViaExtension } from "./extension-google-jobs";
 import { fetchJobTeaserCandidatesViaExtensionBatch } from "./extension-jobteaser-batch";
 import { fetchPageHtmlViaExtension } from "./extension-page-html";
 import { fetchWorkAtAStartupCandidatesViaExtensionBatch } from "./extension-workatstartup-batch";
@@ -189,6 +190,20 @@ function buildWorkAtAStartupSearchSpecsBrowser(input: PreferenceInput): WorkAtAS
   );
 }
 
+function hasGoogleJobsBoard(domains: string[]): boolean {
+  return domains.some((d) => String(d || "").toLowerCase().includes("google.com"));
+}
+
+function buildGoogleJobsUrl(query: string): string {
+  const q = query.trim();
+  if (!q) return "";
+  const u = new URL("https://www.google.com/search");
+  u.searchParams.set("q", q);
+  u.searchParams.set("jbr", "sep:0");
+  u.searchParams.set("udm", "8");
+  return u.toString();
+}
+
 function mergeCandidateBucketsRoundRobin(buckets: SearchCandidate[][], limit: number): SearchCandidate[] {
   const deduped = new Map<string, SearchCandidate>();
   let round = 0;
@@ -280,15 +295,22 @@ export async function runBrowserIngestion(opts: {
   geminiModel: string;
   webhookUrl?: string;
   perTargetLimit?: number;
+  preferenceIds?: string[];
   onProgress?: (event: IngestProgressEvent) => void;
 }): Promise<{ retrieved: number; createdJobs: number }> {
   const perTargetLimit = Math.max(1, Math.min(opts.perTargetLimit ?? 100, 100));
   const geminiParse = { apiKey: opts.geminiApiKey, model: opts.geminiModel };
   opts.onProgress?.({ kind: "phase", step: "Starting search pipeline" });
-  const prefs = await opts.sqlite.all<Record<string, unknown>>(
-    `SELECT * FROM preferences WHERE enabled != 0 AND user_id = ? ORDER BY datetime(updated_at) DESC`,
-    [opts.userId]
-  );
+  const prefIds = Array.isArray(opts.preferenceIds) ? opts.preferenceIds.map(String).filter(Boolean) : [];
+  const prefs = prefIds.length
+    ? await opts.sqlite.all<Record<string, unknown>>(
+        `SELECT * FROM preferences WHERE user_id = ? AND id IN (${prefIds.map(() => "?").join(", ")}) ORDER BY datetime(updated_at) DESC`,
+        [opts.userId, ...prefIds]
+      )
+    : await opts.sqlite.all<Record<string, unknown>>(
+        `SELECT * FROM preferences WHERE enabled != 0 AND user_id = ? ORDER BY datetime(updated_at) DESC`,
+        [opts.userId]
+      );
 
   const [profileRow] = await opts.sqlite.all<Record<string, unknown>>("SELECT * FROM users WHERE id = ?", [
     opts.userId
@@ -313,10 +335,10 @@ export async function runBrowserIngestion(opts: {
   let newJobsCount = 0;
 
   if (!prefs.length) {
-    opts.onProgress?.({ kind: "phase", step: "Nothing to run", detail: "No enabled targets" });
+    opts.onProgress?.({ kind: "phase", step: "Nothing to run", detail: prefIds.length ? "No selected targets" : "No enabled targets" });
     opts.onProgress?.({
       kind: "log",
-      line: "Enable at least one target under Targets, then run the pipeline again."
+      line: prefIds.length ? "Select at least one target, then run the pipeline again." : "Enable at least one target under Targets, then run the pipeline again."
     });
     return { retrieved: 0, createdJobs: 0 };
   }
@@ -496,15 +518,41 @@ export async function runBrowserIngestion(opts: {
           )
         : [];
 
+    let googleJobsCandidates: SearchCandidate[] = [];
+    if (hasGoogleJobsBoard(enriched.boardDomains) && uniqQueriesForExt.length) {
+      opts.onProgress?.({
+        kind: "phase",
+        step: "Google Jobs search",
+        detail: `${uniqQueriesForExt.length} quer${uniqQueriesForExt.length === 1 ? "y" : "ies"}`
+      });
+      for (let qi = 0; qi < uniqQueriesForExt.length; qi++) {
+        const q = uniqQueriesForExt[qi];
+        const url = buildGoogleJobsUrl(q);
+        if (!url) continue;
+        try {
+          const rows = await fetchGoogleJobsCandidatesViaExtension(url, perTargetLimit);
+          googleJobsCandidates.push(...rows);
+        } catch (e) {
+          opts.onProgress?.({ kind: "failure", message: `Google Jobs query failed: ${ingestErrMessage(e)}` });
+        }
+      }
+      googleJobsCandidates = mergeCandidateBucketsRoundRobin([googleJobsCandidates], perTargetLimit);
+      opts.onProgress?.({
+        kind: "log",
+        line: `Google Jobs: ${googleJobsCandidates.length} direct company listing URL${googleJobsCandidates.length === 1 ? "" : "s"}`
+      });
+    }
+
     const candidates = mergeCandidateBucketsRoundRobin(
-      [jobTeaserCandidates, workAtAStartupCandidates, googleCandidates],
+      [jobTeaserCandidates, workAtAStartupCandidates, googleCandidates, googleJobsCandidates],
       perTargetLimit
     );
 
     const mergedSourceLabels = [
       jobTeaserEnabled ? "JobTeaser" : "",
       workAtAStartupEnabled ? "Work at a Startup" : "",
-      enriched.searchQueries.length > 0 ? `Google (${sourceLabel})` : ""
+      enriched.searchQueries.length > 0 ? `Google (${sourceLabel})` : "",
+      googleJobsCandidates.length > 0 ? "Google Jobs" : ""
     ].filter(Boolean);
 
     totalRetrieved += candidates.length;

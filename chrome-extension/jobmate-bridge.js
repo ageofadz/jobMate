@@ -6,7 +6,8 @@ chrome.runtime.onMessage.addListener((msg) => {
         type: "JOBMATE_APPLY_ATTENTION",
         message: msg.message || "",
         instruction: msg.instruction || "",
-        applyUrl: msg.applyUrl || ""
+        applyUrl: msg.applyUrl || "",
+        kind: msg.kind || ""
       },
       "*"
     );
@@ -23,8 +24,11 @@ chrome.runtime.onMessage.addListener((msg) => {
       },
       "*"
     );
+    return;
   }
+
 });
+
 
 window.addEventListener("message", (ev) => {
   if (ev.source !== window) {
@@ -34,6 +38,20 @@ window.addEventListener("message", (ev) => {
   const d = ev.data;
 
   if (!d || d.source !== "jobmate-web") {
+    return;
+  }
+
+  if (d.type === "JOBMATE_EXTENSION_VERSION") {
+    const manifest = chrome.runtime.getManifest();
+    window.postMessage(
+      {
+        source: "jobmate-extension",
+        requestId: d.requestId,
+        ok: true,
+        version: manifest.version || ""
+      },
+      "*"
+    );
     return;
   }
 
@@ -64,7 +82,7 @@ window.addEventListener("message", (ev) => {
   } else if (d.type === "JOBMATE_OPEN_BACKGROUND_TAB") {
     bgMsg = { type: "JOBMATE_OPEN_BACKGROUND_TAB", requestId: d.requestId, url: d.url };
   } else if (d.type === "JOBMATE_OPEN_APPLY_TAB") {
-    bgMsg = { type: "JOBMATE_OPEN_APPLY_TAB", requestId: d.requestId, url: d.url, payloadUrl: d.payloadUrl };
+    bgMsg = { type: "JOBMATE_OPEN_APPLY_TAB", requestId: d.requestId, url: d.url, payloadUrl: d.payloadUrl, sessionId: d.sessionId, jobData: d.jobData };
   } else if (d.type === "JOBMATE_EMAIL_SYNC") {
     bgMsg = { type: "JOBMATE_EMAIL_SYNC", requestId: d.requestId, url: d.url };
   }

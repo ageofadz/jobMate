@@ -4,7 +4,7 @@ import { toast } from "sonner";
 
 import { normalizeApplyUrl } from "@/lib/apply-url";
 
-import { openBackgroundTabViaExtension } from "./extension-open-tab";
+import { openApplyTabViaExtension } from "./extension-open-tab";
 import { runBrowserIngestion } from "./browser-ingest";
 import { classifyJobEmailStatus } from "./gemini-field-answers";
 import {
@@ -21,17 +21,14 @@ import { insertResumePdfAsset, setUserResumeAsset } from "./browser-resume-asset
 import type { JobmateSqlite } from "./sqlite-client";
 import { BrowserProfileWizard, BrowserSetupWizard } from "./startup-wizard";
 import { useJobmateSqlite } from "./sqlite-context";
-import { formatProfileBlock } from "./format-profile-block";
-import { ResultsPanel, type ResultJobRow } from "./results-panel";
+import { openBackgroundTabViaExtension } from "./extension-open-tab";
+import { JOBMATE_EXTENSION_VERSION, pingExtensionVersion } from "./extension-version";
+import { ContactsModal, JobResultCard, type ResultJobRow } from "./results-panel";
 
-type PageId = "home" | "targets" | "results" | "statuses" | "metrics" | "config";
+type PageId = "home" | "config";
 
 const NAV: { id: PageId; label: string }[] = [
   { id: "home", label: "Home" },
-  { id: "targets", label: "Targets" },
-  { id: "results", label: "Results" },
-  { id: "statuses", label: "Statuses" },
-  { id: "metrics", label: "Metrics" },
   { id: "config", label: "Config" }
 ];
 
@@ -79,22 +76,29 @@ export function JobmateApp() {
   const [busy, setBusy] = useState(false);
 
   const [profile, setProfile] = useState<Record<string, unknown> | null>(null);
-  const [prefCount, setPrefCount] = useState<number>(0);
-  const [statusCounts, setStatusCounts] = useState<{ status: string; n: number }[]>([]);
 
-  const [prefs, setPrefs] = useState<{ id: string; title: string; enabled: number; updated_at: string }[]>([]);
+  const [prefs, setPrefs] = useState<{
+    id: string;
+    title: string;
+    enabled: number;
+    updated_at: string;
+    locations: string;
+    keyword_seed: string;
+    board_domains: string;
+  }[]>([]);
 
-  const [resultsPrefFilter, setResultsPrefFilter] = useState<string | "all">("all");
+  const [selectedTargetIds, setSelectedTargetIds] = useState<Set<string>>(new Set());
+  const [bucketFilter, setBucketFilter] = useState<null | "applied" | "archived">(null);
   const [resultJobs, setResultJobs] = useState<ResultJobRow[]>([]);
-
-  const [statusBucket, setStatusBucket] = useState<"archived" | "applied">("archived");
   const [bucketJobs, setBucketJobs] = useState<BucketJobRow[]>([]);
+  const [perTargetLimit, setPerTargetLimit] = useState(20);
 
   const [applySessions, setApplySessions] = useState<Array<{
     jobId: string;
     company: string;
     sourceTitle: string;
     applyUrl: string;
+    tabId?: number | null;
     status: string;
     needsAttention: boolean;
     attentionMessage: string;
@@ -102,11 +106,7 @@ export function JobmateApp() {
     kind: string;
   }>>([]);
 
-  const applySession = applySessions[0] ?? null;
-
   const [emailSyncBusy, setEmailSyncBusy] = useState(false);
-
-  const [metricRows, setMetricRows] = useState<{ day: string; retrieved: number; applied: number }[]>([]);
 
   const [dataEpoch, setDataEpoch] = useState(0);
   const [ingestRunning, setIngestRunning] = useState(false);
@@ -121,6 +121,7 @@ export function JobmateApp() {
     setDataEpoch((x) => x + 1);
   }, []);
 
+
   useEffect(() => {
     function onExtensionMessage(ev: MessageEvent) {
       const data = ev.data as {
@@ -130,14 +131,25 @@ export function JobmateApp() {
         instruction?: string;
         applyUrl?: string;
         kind?: string;
+        requestId?: string;
+        pageUrl?: string;
+        pageTabId?: number | null;
+        tabId?: number | null;
       };
       if (!data || data.source !== "jobmate-extension") {
         return;
       }
       if (data.type === "JOBMATE_APPLY_STARTED") {
+        const tabId = typeof data.tabId === "number" ? data.tabId : null;
         setApplySessions(prev => prev.map(s =>
-          s.applyUrl === data.applyUrl ? { ...s, status: "Applying…" } : s
+          s.applyUrl === data.applyUrl ? { ...s, status: "Applying…", tabId } : s
         ));
+        return;
+      }
+      if (data.type === "JOBMATE_APPLY_CLOSED") {
+        const closedTabId = typeof data.tabId === "number" ? data.tabId : null;
+        if (closedTabId === null) return;
+        setApplySessions(prev => prev.filter(s => (s.tabId ?? null) !== closedTabId));
         return;
       }
       if (data.type !== "JOBMATE_APPLY_ATTENTION") {
@@ -146,13 +158,13 @@ export function JobmateApp() {
       setApplySessions(prev => prev.map(s =>
         s.applyUrl === data.applyUrl
           ? {
-              ...s,
-              status: data.kind === "confirm" ? "Review ready" : "Needs attention",
-              needsAttention: true,
-              attentionMessage: data.message ?? "",
-              attentionInstruction: data.instruction ?? "",
-              kind: data.kind ?? "stuck"
-            }
+            ...s,
+            status: data.kind === "confirm" ? "Review ready" : "Needs attention",
+            needsAttention: true,
+            attentionMessage: data.message ?? "",
+            attentionInstruction: data.instruction ?? "",
+            kind: data.kind ?? "stuck"
+          }
           : s
       ));
     }
@@ -162,6 +174,28 @@ export function JobmateApp() {
 
   const [setupGateResolved, setSetupGateResolved] = useState(false);
   const [setupComplete, setSetupComplete] = useState(false);
+  const [extensionVersionModal, setExtensionVersionModal] = useState<null | { installed: string }>(null);
+
+  useEffect(() => {
+    if (!setupGateResolved || !setupComplete) {
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const installed = await pingExtensionVersion();
+        if (cancelled) return;
+        if (installed !== JOBMATE_EXTENSION_VERSION) {
+          setExtensionVersionModal({ installed });
+        }
+      } catch {
+        if (!cancelled) setExtensionVersionModal({ installed: "" });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [setupGateResolved, setupComplete]);
 
   useEffect(() => {
     const failRefresh = (action: string) => {
@@ -296,31 +330,21 @@ export function JobmateApp() {
     setFetchError(null);
 
     try {
-      if (page === "home" || page === "config") {
-        const [u] = await sqlite.all<Record<string, unknown>>("SELECT * FROM users WHERE id = ?", [userId]);
-        const [{ c }] = await sqlite.all<{ c: number }>(
-          "SELECT COUNT(*) as c FROM preferences WHERE user_id = ?",
+      if (page === "home") {
+        const prows = await sqlite.all<{
+          id: string;
+          title: string;
+          enabled: number;
+          updated_at: string;
+          locations: string;
+          keyword_seed: string;
+          board_domains: string;
+        }>(
+          "SELECT id, title, enabled, updated_at, locations, keyword_seed, board_domains FROM preferences WHERE user_id = ? ORDER BY datetime(updated_at) DESC",
           [userId]
         );
-        const sc = await sqlite.all<{ status: string; n: number }>(
-          "SELECT status, COUNT(*) as n FROM jobs WHERE user_id = ? GROUP BY status ORDER BY status",
-          [userId]
-        );
-        setProfile(u ?? null);
-        setPrefCount(Number(c));
-        setStatusCounts(sc);
-      } else if (page === "targets") {
-        const rows = await sqlite.all<{ id: string; title: string; enabled: number; updated_at: string }>(
-          "SELECT id, title, enabled, updated_at FROM preferences WHERE user_id = ? ORDER BY datetime(updated_at) DESC",
-          [userId]
-        );
-        setPrefs(rows);
-      } else if (page === "results") {
-        const prow = await sqlite.all<{ id: string; title: string; enabled: number; updated_at: string }>(
-          "SELECT id, title, enabled, updated_at FROM preferences WHERE user_id = ? ORDER BY datetime(updated_at) DESC",
-          [userId]
-        );
-        setPrefs(prow);
+        setPrefs(prows);
+
         const jrows = await sqlite.all<ResultJobRow>(
           `SELECT id, preference_id, company, source_title, status, discovered_at, posted_at, company_logo_url, apply_url,
             source_url, summary, listing_text, compensation_range, location, company_homepage,
@@ -329,37 +353,9 @@ export function JobmateApp() {
           [userId]
         );
         setResultJobs(jrows);
-      } else if (page === "statuses") {
-        const statuses =
-          statusBucket === "archived"
-            ? (["archived", "dismissed"] as const)
-            : (["applied"] as const);
-        const placeholders = statuses.map(() => "?").join(", ");
-        const jrows = await sqlite.all<BucketJobRow>(
-          `SELECT id, company, source_title, status, discovered_at, applied_at, archived_at, apply_url,
-            source_url, summary, listing_text, compensation_range, location, company_homepage,
-            linkedin_links, hiring_contacts, applied_application_url, applied_at_linkedin_links, applied_at_hiring_contacts, email_status
-           FROM jobs WHERE user_id = ? AND status IN (${placeholders}) ORDER BY datetime(COALESCE(applied_at, archived_at, discovered_at)) DESC`,
-          [userId, ...statuses]
-        );
-        setBucketJobs(jrows);
-      } else if (page === "metrics") {
-        const mrows = await sqlite.all<{ day: string; retrieved: number; applied: number }>(
-          `WITH dates AS (
-            SELECT substr(discovered_at, 1, 10) AS day FROM jobs WHERE user_id = ?
-            UNION
-            SELECT substr(applied_at, 1, 10) AS day FROM jobs WHERE user_id = ? AND applied_at IS NOT NULL
-          )
-          SELECT
-            day,
-            (SELECT COUNT(*) FROM jobs j WHERE j.user_id = ? AND substr(j.discovered_at, 1, 10) = dates.day) AS retrieved,
-            (SELECT COUNT(*) FROM jobs j WHERE j.user_id = ? AND j.applied_at IS NOT NULL AND substr(j.applied_at, 1, 10) = dates.day) AS applied
-          FROM dates
-          ORDER BY day DESC
-          LIMIT ?`,
-          [userId, userId, userId, userId, 14]
-        );
-        setMetricRows(mrows);
+      } else if (page === "config") {
+        const [u] = await sqlite.all<Record<string, unknown>>("SELECT * FROM users WHERE id = ?", [userId]);
+        setProfile(u ?? null);
       }
     } catch (e) {
       setFetchError(e instanceof Error ? e.message : String(e));
@@ -368,23 +364,52 @@ export function JobmateApp() {
         setBusy(false);
       }
     }
-  }, [sqlite, userId, page, statusBucket, dataEpoch]);
+  }, [sqlite, userId, page, dataEpoch]);
 
   useEffect(() => {
     void loadPage();
   }, [loadPage]);
 
-  const openJobsCount = useMemo(() => {
-    let n = 0;
-    for (const r of statusCounts) {
-      if (r.status === "new" || r.status === "reviewed") {
-        n += r.n;
+  const loadBucketJobs = useCallback(
+    async (bucket: "applied" | "archived") => {
+      if (!sqlite || userId === null) {
+        return;
       }
-    }
-    return n;
-  }, [statusCounts]);
 
-  const runSearchPipeline = useCallback(async () => {
+      const statuses =
+        bucket === "applied"
+          ? (["applied"] as const)
+          : (["archived", "dismissed"] as const);
+      const placeholders = statuses.map(() => "?").join(", ");
+      const jrows = await sqlite.all<BucketJobRow>(
+        `SELECT id, company, source_title, status, discovered_at, applied_at, archived_at, apply_url,
+          source_url, summary, listing_text, compensation_range, location, company_homepage,
+          linkedin_links, hiring_contacts, applied_application_url, applied_at_linkedin_links, applied_at_hiring_contacts, email_status
+         FROM jobs WHERE user_id = ? AND status IN (${placeholders}) ORDER BY datetime(COALESCE(applied_at, archived_at, discovered_at)) DESC`,
+        [userId, ...statuses]
+      );
+      setBucketJobs(jrows);
+    },
+    [sqlite, userId, dataEpoch]
+  );
+
+  const toggleTargetSelection = useCallback((prefId: string) => {
+    setBucketFilter(null);
+    setSelectedTargetIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(prefId)) next.delete(prefId);
+      else next.add(prefId);
+      return next;
+    });
+  }, []);
+
+  const selectBucket = useCallback((bucket: "applied" | "archived") => {
+    setSelectedTargetIds(new Set());
+    setBucketFilter(bucket);
+    void loadBucketJobs(bucket);
+  }, [loadBucketJobs]);
+
+  const runSearchPipeline = useCallback(async (prefIds: Set<string>) => {
     if (!sqlite || userId === null) {
       return;
     }
@@ -420,7 +445,8 @@ export function JobmateApp() {
         geminiApiKey: gemRows[0]?.value?.trim() ? gemRows[0].value : null,
         geminiModel: modRows[0]?.value?.trim() || "gemini-3.1-flash-lite",
         webhookUrl: hookRows[0]?.value?.trim() ?? "",
-        perTargetLimit: 100,
+        perTargetLimit,
+        preferenceIds: Array.from(prefIds),
         onProgress: (ev) => {
           if (ev.kind === "phase") {
             ingestPhaseRef.current = {
@@ -468,7 +494,7 @@ export function JobmateApp() {
       ingestRunningRef.current = false;
       setIngestRunning(false);
     }
-  }, [sqlite, userId, bumpData]);
+  }, [sqlite, userId, bumpData, perTargetLimit]);
 
   async function loadPreferenceRow(prefId: string) {
     if (!sqlite || userId === null) {
@@ -485,10 +511,8 @@ export function JobmateApp() {
     if (!sqlite || userId === null) {
       return;
     }
-    const now = new Date().toISOString();
-    await sqlite.run(`UPDATE preferences SET enabled = ?, updated_at = ? WHERE id = ? AND user_id = ?`, [
+    await sqlite.run(`UPDATE preferences SET enabled = ? WHERE id = ? AND user_id = ?`, [
       enabled ? 1 : 0,
-      now,
       prefId,
       userId
     ]);
@@ -580,20 +604,6 @@ export function JobmateApp() {
         return;
       }
 
-      const gemRows = await sqlite.all<{ value: string }>("SELECT value FROM kv_settings WHERE key = ?", [
-        SETTING_GEMINI_API_KEY
-      ]);
-      const modRows = await sqlite.all<{ value: string }>("SELECT value FROM kv_settings WHERE key = ?", [
-        SETTING_GEMINI_MODEL
-      ]);
-      const geminiApiKey = gemRows[0]?.value?.trim() ?? "";
-      const geminiModel = modRows[0]?.value?.trim() || "gemini-3.1-flash-lite";
-
-      if (!geminiApiKey) {
-        window.alert("Add a Gemini API key in Config to use Chrome fill.");
-        return;
-      }
-
       const jobRows = await sqlite.all<{
         apply_url: string;
         company: string;
@@ -608,107 +618,16 @@ export function JobmateApp() {
       );
 
       const job = jobRows[0];
-
-      if (!job) {
-        return;
-      }
-
-      const [profileRow] = await sqlite.all<Record<string, unknown>>("SELECT * FROM users WHERE id = ?", [userId]);
-
-      let resumeUpload: { name: string; mimeType: string; base64: string } | null = null;
-      const resumeAssetId = profileRow?.resume_asset_id ? String(profileRow.resume_asset_id) : null;
-
-      if (resumeAssetId) {
-        const pdfRows = await sqlite.all<{ filename: string; mime_type: string; file_blob: unknown }>(
-          `SELECT filename, mime_type, file_blob FROM assets WHERE id = ? AND user_id = ? AND kind = 'resume_pdf'`,
-          [resumeAssetId, userId]
-        );
-        const asset = pdfRows[0];
-        const fb = asset?.file_blob;
-
-        if (asset && fb instanceof Uint8Array && fb.byteLength > 0) {
-          let binary = "";
-          const chunk = 0x8000;
-
-          for (let i = 0; i < fb.length; i += chunk) {
-            binary += String.fromCharCode(...fb.subarray(i, i + chunk));
-          }
-
-          resumeUpload = {
-            name: asset.filename,
-            mimeType: asset.mime_type,
-            base64: btoa(binary)
-          };
-        }
-      }
-
-      const contextBlock = profileRow ? formatProfileBlock(profileRow) : "";
+      if (!job) return;
 
       let linkedinLinks: string[] = [];
-
-      try {
-        linkedinLinks = JSON.parse(String(job.linkedin_links ?? "[]")) as string[];
-      } catch {
-        linkedinLinks = [];
-      }
+      try { linkedinLinks = JSON.parse(String(job.linkedin_links ?? "[]")) as string[]; } catch { linkedinLinks = []; }
 
       let hiringContacts: string[] = [];
-
-      try {
-        hiringContacts = JSON.parse(String(job.hiring_contacts ?? "[]")) as string[];
-      } catch {
-        hiringContacts = [];
-      }
+      try { hiringContacts = JSON.parse(String(job.hiring_contacts ?? "[]")) as string[]; } catch { hiringContacts = []; }
 
       const sessionId = crypto.randomUUID();
       const applyUrlNormalized = normalizeApplyUrl(String(job.apply_url));
-
-      const payload = {
-        id: sessionId,
-        jobId,
-        title: String(job.source_title ?? ""),
-        company: String(job.company ?? ""),
-        companyHomepage: String(job.company_homepage ?? ""),
-        applyUrl: applyUrlNormalized,
-        contextBlock,
-        listingText: String(job.listing_text ?? ""),
-        resumeText: "",
-        writingSample: String(profileRow?.essay ?? ""),
-        coverLetterTemplate: String(profileRow?.cover_letter_template ?? ""),
-        coverLetterText: "",
-        candidateEmail: String(profileRow?.email ?? "").trim(),
-        candidateFullName: String(profileRow?.full_name ?? "").trim(),
-        resumeUpload,
-        coverUpload: null,
-        linkedinLinks: Array.isArray(linkedinLinks) ? linkedinLinks.map(String) : [],
-        hiringContacts: Array.isArray(hiringContacts) ? hiringContacts.map(String) : [],
-        answerPageHtml:
-          "<!doctype html><html><head><meta charset=\"utf-8\"><title>JobMate</title></head><body></body></html>"
-      };
-
-      const res = await fetch(`${window.location.origin}/api/chrome-apply/register`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ geminiApiKey, geminiModel, payload })
-      });
-
-      const data = (await res.json()) as { error?: string; payloadUrl?: string };
-
-      if (!res.ok) {
-        window.alert(data.error ?? `Chrome session failed (${res.status})`);
-        return;
-      }
-
-      const payloadUrl = data.payloadUrl;
-
-      if (!payloadUrl) {
-        window.alert("Chrome session missing payload URL.");
-        return;
-      }
-
-      const u = new URL(applyUrlNormalized);
-      u.hash = `jobmatePayload=${encodeURIComponent(payloadUrl)}`;
-      const applyTabUrl = u.toString();
 
       const newSession = {
         jobId,
@@ -725,7 +644,15 @@ export function JobmateApp() {
       setApplySessions(prev => [...prev, newSession]);
 
       try {
-        await openBackgroundTabViaExtension(applyTabUrl, payloadUrl);
+        await openApplyTabViaExtension(applyUrlNormalized, sessionId, {
+          jobId,
+          title: String(job.source_title ?? ""),
+          company: String(job.company ?? ""),
+          companyHomepage: String(job.company_homepage ?? ""),
+          listingText: String(job.listing_text ?? ""),
+          linkedinLinks: Array.isArray(linkedinLinks) ? linkedinLinks.map(String) : [],
+          hiringContacts: Array.isArray(hiringContacts) ? hiringContacts.map(String) : []
+        });
       } catch (err) {
         toast.error(err instanceof Error ? err.message : String(err));
         setApplySessions(prev => prev.filter(s => s.jobId !== jobId));
@@ -750,6 +677,11 @@ export function JobmateApp() {
       return;
     }
     await markAppliedRow(jobId, applyUrl);
+    setApplySessions(prev => prev.filter(s => s.jobId !== jobId));
+  }
+
+  async function archiveFromApplySession(jobId: string) {
+    await archiveJobRow(jobId);
     setApplySessions(prev => prev.filter(s => s.jobId !== jobId));
   }
 
@@ -905,8 +837,11 @@ export function JobmateApp() {
   }
 
   const filteredResults = useMemo(() => {
+    if (bucketFilter) {
+      return [];
+    }
     const list =
-      resultsPrefFilter === "all" ? resultJobs : resultJobs.filter((j) => j.preference_id === resultsPrefFilter);
+      selectedTargetIds.size === 0 ? resultJobs : resultJobs.filter((j) => selectedTargetIds.has(j.preference_id));
     const bestByApply = new Map<string, ResultJobRow>();
 
     for (const j of list) {
@@ -921,7 +856,7 @@ export function JobmateApp() {
     return Array.from(bestByApply.values()).sort((a, b) =>
       a.discovered_at < b.discovered_at ? 1 : a.discovered_at > b.discovered_at ? -1 : 0
     );
-  }, [resultJobs, resultsPrefFilter]);
+  }, [resultJobs, selectedTargetIds, bucketFilter]);
 
   if (error) {
     return (
@@ -996,7 +931,7 @@ export function JobmateApp() {
   }
 
   return (
-    <div className="flex min-h-screen bg-white text-gray-900 dark:bg-gray-950 dark:text-gray-100">
+    <div className="relative flex h-dvh min-h-0 flex-col bg-white text-gray-900 dark:bg-gray-950 dark:text-gray-100">
       {applySessions.map((s, i) => (
         <ApplySessionBadge
           key={s.jobId}
@@ -1004,9 +939,18 @@ export function JobmateApp() {
           index={i}
           onDismiss={() => setApplySessions(prev => prev.filter(x => x.jobId !== s.jobId))}
           onDoneApplying={() => void doneApplying(s.jobId, s.applyUrl)}
+          onArchive={() => void archiveFromApplySession(s.jobId)}
         />
       ))}
-      <aside className="flex w-52 shrink-0 flex-col border-r border-gray-200 dark:border-gray-800">
+      {extensionVersionModal ? (
+        <ExtensionVersionModal
+          installed={extensionVersionModal.installed}
+          expected={JOBMATE_EXTENSION_VERSION}
+          onDismiss={() => setExtensionVersionModal(null)}
+        />
+      ) : null}
+      <div className="peer/sidebar pointer-events-auto absolute left-0 top-0 z-40 h-full w-3" />
+      <aside className="pointer-events-none absolute left-0 top-0 z-50 flex h-full w-52 -translate-x-full flex-col border-r border-gray-200 bg-white opacity-0 transition-all duration-200 peer-hover/sidebar:pointer-events-auto peer-hover/sidebar:translate-x-0 peer-hover/sidebar:opacity-100 hover:pointer-events-auto hover:translate-x-0 hover:opacity-100 focus-within:pointer-events-auto focus-within:translate-x-0 focus-within:opacity-100 dark:border-gray-800 dark:bg-gray-950">
         <div className="border-b border-gray-200 px-4 py-5 dark:border-gray-800">
           <h1 className="text-lg font-semibold tracking-tight">JobMate</h1>
         </div>
@@ -1026,59 +970,44 @@ export function JobmateApp() {
           ))}
         </nav>
       </aside>
-      <main className={`flex-1 overflow-auto px-8 py-10 ${page === "results" ? "min-w-0" : ""}`}>
+      <main
+        className={`flex min-h-0 w-full flex-1 flex-col px-8 py-10 ${page === "home" ? "overflow-hidden" : "overflow-auto"}`}
+      >
         {fetchError ? (
           <p className="text-sm text-red-600 dark:text-red-400">{fetchError}</p>
         ) : busy ? (
           <p className="text-sm text-gray-500 dark:text-gray-400">Loading…</p>
         ) : page === "home" ? (
           <HomePanel
-            profile={profile}
-            prefCount={prefCount}
-            statusCounts={statusCounts}
-            openJobsCount={openJobsCount}
-            ingestRunning={ingestRunning}
-            onRunSearch={runSearchPipeline}
-          />
-        ) : page === "targets" ? (
-          <TargetsPanel
             prefs={prefs}
+            resultJobs={filteredResults}
+            bucketJobs={bucketJobs}
+            selectedTargetIds={selectedTargetIds}
+            bucketFilter={bucketFilter}
+            onToggleTarget={toggleTargetSelection}
+            onSelectBucket={selectBucket}
+            perTargetLimit={perTargetLimit}
+            onPerTargetLimitChange={setPerTargetLimit}
+            ingestRunning={ingestRunning}
+            onRunSearch={() => void runSearchPipeline(selectedTargetIds)}
             onAdd={() => setPrefModal({ mode: "add", row: null })}
             onEdit={async (id) => {
               const row = await loadPreferenceRow(id);
-              if (row) {
-                setPrefModal({ mode: "edit", row });
-              }
+              if (row) { setPrefModal({ mode: "edit", row }); }
             }}
-            onToggle={togglePreferenceEnabled}
             onDelete={deletePreference}
             confirmClearHistory={confirmClearHistory}
             setConfirmClearHistory={setConfirmClearHistory}
             onClearHistory={clearJobHistory}
-          />
-        ) : page === "results" ? (
-          <ResultsPanel
-            prefs={prefs}
-            jobs={filteredResults}
-            filter={resultsPrefFilter}
-            onFilter={setResultsPrefFilter}
             onArchive={archiveJobRow}
             onMarkApplied={markAppliedRow}
             onChromeApply={openChromeApplyForJob}
             onFetchContacts={fetchJobContacts}
-          />
-        ) : page === "statuses" ? (
-          <StatusesPanel
-            bucket={statusBucket}
-            onBucket={setStatusBucket}
-            jobs={bucketJobs}
-            onRestore={statusBucket === "archived" ? unarchiveRow : unapplyRow}
-            onDelete={deleteJobRow}
+            onRestoreJob={(id) => void (bucketFilter === "applied" ? unapplyRow(id) : unarchiveRow(id))}
+            onDeleteJob={deleteJobRow}
             emailSyncBusy={emailSyncBusy}
             onEmailSync={() => void runEmailSync()}
           />
-        ) : page === "metrics" ? (
-          <MetricsPanel rows={metricRows} />
         ) : (
           <ConfigPanel sqlite={sqlite} userId={userId} profile={profile} bumpData={bumpData} dataEpoch={dataEpoch} />
         )}
@@ -1098,6 +1027,49 @@ export function JobmateApp() {
   );
 }
 
+function ExtensionVersionModal(props: { installed: string; expected: string; onDismiss: () => void }) {
+  const { installed, expected, onDismiss } = props;
+  const missing = !installed.trim();
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4">
+      <div
+        role="dialog"
+        aria-modal="true"
+        className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-6 shadow-xl dark:border-gray-700 dark:bg-gray-900"
+      >
+        <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+          {missing ? "Chrome extension required" : "Chrome extension update required"}
+        </h2>
+        <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">
+          {missing
+            ? "JobMate needs the Chrome extension loaded to search and apply in your browser."
+            : `Your extension reports version ${installed}. This app requires version ${expected}.`}
+        </p>
+        <ol className="mt-4 list-decimal space-y-2 pl-5 text-sm text-gray-700 dark:text-gray-300">
+          <li>
+            <a href="/chrome-extension.zip" download className="font-medium text-blue-700 underline dark:text-blue-400">
+              Download chrome-extension.zip
+            </a>
+          </li>
+          <li>Open <span className="font-mono text-xs">chrome://extensions</span> in Chrome.</li>
+          <li>Enable Developer mode.</li>
+          <li>Remove the old JobMate extension if it is listed.</li>
+          <li>Extract the zip, then choose Load unpacked and select the extracted folder.</li>
+          <li>Reload this page.</li>
+        </ol>
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="mt-6 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-medium text-gray-800 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-800"
+        >
+          Dismiss
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function ApplySessionBadge(props: {
   session: {
     company: string;
@@ -1111,10 +1083,11 @@ function ApplySessionBadge(props: {
   index: number;
   onDismiss: () => void;
   onDoneApplying: () => void;
+  onArchive: () => void;
 }) {
-  const { session, index, onDismiss, onDoneApplying } = props;
+  const { session, index, onDismiss, onDoneApplying, onArchive } = props;
   const isAttention = session.needsAttention;
-  const topOffset = 16 + index * 180;
+  const topOffset = 16 + index * 220;
 
   return (
     <div className="fixed right-4 z-50 w-72 rounded-xl border shadow-lg bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-700 overflow-hidden" style={{ top: topOffset }}>
@@ -1144,13 +1117,20 @@ function ApplySessionBadge(props: {
         ) : null}
       </div>
       {isAttention ? (
-        <div className="px-4 pb-3">
+        <div className="px-4 pb-3 space-y-2">
           <button
             type="button"
             onClick={onDoneApplying}
             className="w-full rounded-lg bg-emerald-600 px-3 py-2 text-sm font-medium text-white hover:bg-emerald-700"
           >
             Done applying
+          </button>
+          <button
+            type="button"
+            onClick={onArchive}
+            className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-medium text-gray-800 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-800"
+          >
+            Archive
           </button>
         </div>
       ) : null}
@@ -1159,185 +1139,450 @@ function ApplySessionBadge(props: {
 }
 
 function HomePanel(props: {
-  profile: Record<string, unknown> | null;
-  prefCount: number;
-  statusCounts: { status: string; n: number }[];
-  openJobsCount: number;
+  prefs: {
+    id: string;
+    title: string;
+    enabled: number;
+    updated_at: string;
+    locations: string;
+    keyword_seed: string;
+    board_domains: string;
+  }[];
+  resultJobs: ResultJobRow[];
+  bucketJobs: BucketJobRow[];
+  selectedTargetIds: Set<string>;
+  bucketFilter: null | "applied" | "archived";
+  onToggleTarget: (id: string) => void;
+  onSelectBucket: (bucket: "applied" | "archived") => void;
+  perTargetLimit: number;
+  onPerTargetLimitChange: (v: number) => void;
   ingestRunning: boolean;
   onRunSearch: () => void;
-}) {
-  const {
-    profile,
-    prefCount,
-    statusCounts,
-    openJobsCount,
-    ingestRunning,
-    onRunSearch
-  } = props;
-
-  return (
-    <div className="max-w-3xl space-y-8">
-      <div>
-        <h2 className="text-xl font-semibold tracking-tight">Home</h2>
-        <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">Profile, counts, and search pipeline.</p>
-      </div>
-      <section className="rounded-xl border border-gray-200 p-5 dark:border-gray-800">
-        <h3 className="text-sm font-medium text-gray-500 dark:text-gray-400">Profile</h3>
-        <dl className="mt-3 grid gap-2 text-sm">
-          <div className="flex gap-2">
-            <dt className="w-28 shrink-0 text-gray-500 dark:text-gray-400">Email</dt>
-            <dd>{profile ? String(profile.email ?? "") : ""}</dd>
-          </div>
-          <div className="flex gap-2">
-            <dt className="w-28 shrink-0 text-gray-500 dark:text-gray-400">Name</dt>
-            <dd>{profile ? String(profile.full_name ?? "") : ""}</dd>
-          </div>
-          <div className="flex gap-2">
-            <dt className="w-28 shrink-0 text-gray-500 dark:text-gray-400">Location</dt>
-            <dd>{profile ? String(profile.location ?? "") : ""}</dd>
-          </div>
-        </dl>
-      </section>
-      <section className="flex flex-wrap gap-4">
-        <div className="rounded-xl border border-gray-200 px-5 py-4 dark:border-gray-800">
-          <p className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">Targets</p>
-          <p className="mt-1 text-2xl font-semibold tabular-nums">{prefCount}</p>
-        </div>
-        <div className="rounded-xl border border-gray-200 px-5 py-4 dark:border-gray-800">
-          <p className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">Open jobs</p>
-          <p className="mt-1 text-2xl font-semibold tabular-nums">{openJobsCount}</p>
-        </div>
-        {statusCounts.map((row) => (
-          <div
-            key={row.status}
-            className="rounded-xl border border-gray-200 px-5 py-4 dark:border-gray-800"
-          >
-            <p className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">{row.status}</p>
-            <p className="mt-1 text-2xl font-semibold tabular-nums">{row.n}</p>
-          </div>
-        ))}
-      </section>
-      <section className="rounded-xl border border-gray-200 p-5 dark:border-gray-800">
-        <button
-          type="button"
-          disabled={ingestRunning}
-          onClick={() => void onRunSearch()}
-          className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900"
-        >
-          {ingestRunning ? "Running search pipeline…" : "Run search pipeline"}
-        </button>
-      </section>
-    </div>
-  );
-}
-
-function TargetsPanel(props: {
-  prefs: { id: string; title: string; enabled: number; updated_at: string }[];
   onAdd: () => void;
   onEdit: (id: string) => void;
-  onToggle: (id: string, enabled: boolean) => void;
   onDelete: (id: string) => void;
   confirmClearHistory: boolean;
   setConfirmClearHistory: (v: boolean) => void;
   onClearHistory: () => void;
+  onArchive: (jobId: string) => void | Promise<void>;
+  onMarkApplied: (jobId: string, applyUrl: string) => void | Promise<void>;
+  onChromeApply: (jobId: string) => void | Promise<void>;
+  onFetchContacts: (job: ResultJobRow) => Promise<{ linkedinLinks: string[]; hiringContacts: string[] }>;
+  onRestoreJob: (jobId: string) => void;
+  onDeleteJob: (jobId: string) => void;
+  emailSyncBusy: boolean;
+  onEmailSync: () => void;
 }) {
   const {
-    prefs,
-    onAdd,
-    onEdit,
-    onToggle,
-    onDelete,
-    confirmClearHistory,
-    setConfirmClearHistory,
-    onClearHistory
+    prefs, resultJobs, bucketJobs, selectedTargetIds, bucketFilter, onToggleTarget, onSelectBucket,
+    perTargetLimit, onPerTargetLimitChange,
+    ingestRunning, onRunSearch, onAdd, onEdit, onDelete,
+    confirmClearHistory, setConfirmClearHistory, onClearHistory,
+    onArchive, onMarkApplied, onChromeApply, onFetchContacts,
+    onRestoreJob, onDeleteJob, emailSyncBusy, onEmailSync
   } = props;
 
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [contactsJob, setContactsJob] = useState<ResultJobRow | null>(null);
+  const [contactsLinkedin, setContactsLinkedin] = useState<string[]>([]);
+  const [contactsEmails, setContactsEmails] = useState<string[]>([]);
+  const [contactsBusy, setContactsBusy] = useState(false);
+  const [contactsError, setContactsError] = useState<string | null>(null);
+  const [sortBy, setSortBy] = useState<"alpha" | "retrieved" | "listed">("retrieved");
+
+  const isBucket = bucketFilter !== null;
+  const visibleResultJobs = isBucket ? [] : (selectedTargetIds.size === 0 ? resultJobs : resultJobs.filter((j) => selectedTargetIds.has(j.preference_id)));
+  const allSelected = visibleResultJobs.length > 0 && visibleResultJobs.every((j) => selected.has(j.id));
+
+  function toggleOne(jobId: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(jobId)) { next.delete(jobId); } else { next.add(jobId); }
+      return next;
+    });
+  }
+
+  function toggleAll() {
+    if (allSelected) { setSelected(new Set()); return; }
+    setSelected(new Set(visibleResultJobs.map((j) => j.id)));
+  }
+
+  async function runBulk(action: "apply" | "mark" | "archive") {
+    const ids = Array.from(selected);
+    for (const id of ids) {
+      const job = visibleResultJobs.find((j) => j.id === id);
+      if (!job) continue;
+      if (action === "apply") await onChromeApply(job.id);
+      else if (action === "mark") await onMarkApplied(job.id, normalizeApplyUrl(job.apply_url));
+      else await onArchive(job.id);
+    }
+    setSelected(new Set());
+  }
+
+  async function openContacts(job: ResultJobRow) {
+    const storedLinkedin = parseStoredJsonStrings(job.linkedin_links);
+    const storedContacts = parseStoredJsonStrings(job.hiring_contacts);
+    setContactsJob(job);
+    setContactsLinkedin(storedLinkedin);
+    setContactsEmails(storedContacts);
+    setContactsError(null);
+    if (storedLinkedin.length || storedContacts.length) return;
+    setContactsBusy(true);
+    try {
+      const fetched = await onFetchContacts(job);
+      setContactsLinkedin(fetched.linkedinLinks);
+      setContactsEmails(fetched.hiringContacts);
+    } catch (e) {
+      setContactsError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setContactsBusy(false);
+    }
+  }
+
+  const enabledTargetsCount = selectedTargetIds.size;
+  const runDisabled = ingestRunning || enabledTargetsCount === 0;
+  const sortedVisibleResultJobs = useMemo(() => {
+    const list = [...visibleResultJobs];
+    if (sortBy === "alpha") {
+      list.sort((a, b) => `${a.company} ${a.source_title}`.localeCompare(`${b.company} ${b.source_title}`));
+      return list;
+    }
+    if (sortBy === "listed") {
+      list.sort((a, b) => {
+        const av = a.posted_at ? Date.parse(a.posted_at) : Number.NEGATIVE_INFINITY;
+        const bv = b.posted_at ? Date.parse(b.posted_at) : Number.NEGATIVE_INFINITY;
+        return bv - av;
+      });
+      return list;
+    }
+    list.sort((a, b) => Date.parse(b.discovered_at) - Date.parse(a.discovered_at));
+    return list;
+  }, [visibleResultJobs, sortBy]);
+  const sortedBucketJobs = useMemo(() => {
+    const list = [...bucketJobs];
+    if (sortBy === "alpha") {
+      list.sort((a, b) => `${a.company} ${a.source_title}`.localeCompare(`${b.company} ${b.source_title}`));
+      return list;
+    }
+    if (sortBy === "listed") {
+      list.sort((a, b) => {
+        const av = Date.parse(a.applied_at ?? a.archived_at ?? a.discovered_at);
+        const bv = Date.parse(b.applied_at ?? b.archived_at ?? b.discovered_at);
+        return bv - av;
+      });
+      return list;
+    }
+    list.sort((a, b) => Date.parse(b.discovered_at) - Date.parse(a.discovered_at));
+    return list;
+  }, [bucketJobs, sortBy]);
+
   return (
-    <div className="max-w-3xl space-y-6">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h2 className="text-xl font-semibold tracking-tight">Targets</h2>
-          <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">Add, edit, enable, or delete search targets.</p>
-        </div>
-        <div className="flex flex-wrap gap-2">
+    <div className="flex h-full min-h-0 flex-col space-y-8">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 className="text-xl font-semibold tracking-tight">Home</h2>
+        <div className="flex items-center gap-3">
+          <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+            <span className="text-xs text-gray-500 dark:text-gray-400">Jobs per target</span>
+            <input
+              type="number"
+              min={1}
+              max={500}
+              value={perTargetLimit}
+              onChange={(ev) => onPerTargetLimitChange(Math.max(1, parseInt(ev.target.value, 10) || 1))}
+              className="w-20 rounded-md border border-gray-300 bg-white px-2 py-1 text-sm tabular-nums dark:border-gray-700 dark:bg-gray-900"
+            />
+          </label>
           <button
             type="button"
-            onClick={onAdd}
-            className="rounded-lg bg-gray-900 px-3 py-2 text-sm font-medium text-white dark:bg-gray-100 dark:text-gray-900"
+            disabled={runDisabled}
+            onClick={() => void onRunSearch()}
+            className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900"
           >
-            Add target
+            {ingestRunning ? "Running…" : `Run ${enabledTargetsCount} target${enabledTargetsCount === 1 ? "" : "s"}`}
           </button>
-          {confirmClearHistory ? (
-            <>
-              <button
-                type="button"
-                onClick={() => setConfirmClearHistory(false)}
-                className="rounded-lg border border-gray-300 px-3 py-2 text-sm dark:border-gray-700"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={() => void onClearHistory()}
-                className="rounded-lg border border-red-300 px-3 py-2 text-sm text-red-700 dark:border-red-900 dark:text-red-400"
-              >
-                Confirm clear history
-              </button>
-            </>
-          ) : (
-            <button
-              type="button"
-              onClick={() => setConfirmClearHistory(true)}
-              className="rounded-lg border border-gray-300 px-3 py-2 text-sm dark:border-gray-700"
-            >
-              Clear applied &amp; archived jobs
-            </button>
-          )}
         </div>
       </div>
-      <ul className="divide-y divide-gray-200 rounded-xl border border-gray-200 dark:divide-gray-800 dark:border-gray-800">
-        {prefs.length === 0 ? (
-          <li className="px-4 py-8 text-center text-sm text-gray-500 dark:text-gray-400">No targets yet.</li>
-        ) : (
-          prefs.map((p) => (
-            <li key={p.id} className="flex flex-wrap items-start justify-between gap-4 px-4 py-3">
-              <div className="min-w-0">
-                <p className="font-medium">{p.title}</p>
-                <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">{p.id}</p>
+
+      <section className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300">Targets</h3>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={onAdd}
+              className="rounded-md border border-gray-300 px-2.5 py-1 text-xs font-medium hover:bg-gray-50 dark:border-gray-700 dark:hover:bg-gray-900/60"
+            >
+              New target
+            </button>
+            {confirmClearHistory ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setConfirmClearHistory(false)}
+                  className="rounded-md border border-gray-300 px-2.5 py-1 text-xs dark:border-gray-700"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void onClearHistory()}
+                  className="rounded-md border border-red-300 px-2.5 py-1 text-xs text-red-700 dark:border-red-900 dark:text-red-400"
+                >
+                  Confirm clear history
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setConfirmClearHistory(true)}
+                className="rounded-md border border-gray-300 px-2.5 py-1 text-xs dark:border-gray-700"
+              >
+                Clear history
+              </button>
+            )}
+          </div>
+        </div>
+        <div className="flex gap-3 overflow-x-auto pb-1">
+          {prefs.length === 0 ? (
+            <div className="rounded-xl border border-gray-200 px-4 py-6 text-center text-sm text-gray-500 dark:border-gray-800 dark:text-gray-400">
+              No targets yet. Add one to get started.
+            </div>
+          ) : (
+            prefs.map((p) => (
+              <div
+                key={p.id}
+                onClick={() => onToggleTarget(p.id)}
+                className={`flex h-full w-64 shrink-0 cursor-pointer flex-col rounded-xl border p-4 transition-colors ${selectedTargetIds.has(p.id)
+                  ? "border-gray-900 bg-gray-100 dark:border-gray-100 dark:bg-gray-900"
+                  : "border-gray-200 hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900/60"
+                  }`}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1 text-left">
+                    <p className={`text-sm font-semibold wrap-break-word ${selectedTargetIds.has(p.id) ? "text-gray-900 dark:text-gray-100" : "text-gray-800 dark:text-gray-200"}`}>
+                      {p.title}
+                    </p>
+                  </div>
+                </div>
+                <div className="mt-2 space-y-1 text-[11px] leading-snug text-gray-500 dark:text-gray-400">
+                  <p className="wrap-break-word">
+                    Keywords: {parseStoredJsonStrings(p.keyword_seed).join(", ") || "—"}
+                  </p>
+                  <p className="wrap-break-word">
+                    Locations: {parseStoredJsonStrings(p.locations).join(", ") || "—"}
+                  </p>
+                  <p className="wrap-break-word">
+                    Site targets: {parseStoredJsonStrings(p.board_domains).join(", ") || "—"}
+                  </p>
+                </div>
+                <div className="mt-auto pt-3 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={(ev) => {
+                      ev.stopPropagation();
+                      void onEdit(p.id);
+                    }}
+                    className="rounded-md border border-gray-300 px-2 py-1 text-xs hover:bg-gray-50 dark:border-gray-700 dark:hover:bg-gray-900/60"
+                  >
+                    Edit
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(ev) => {
+                      ev.stopPropagation();
+                      void onDelete(p.id);
+                    }}
+                    className="rounded-md border border-red-200 px-2 py-1 text-xs text-red-700 hover:bg-red-50 dark:border-red-900 dark:text-red-400 dark:hover:bg-red-950/30"
+                  >
+                    Delete
+                  </button>
+                </div>
               </div>
-              <div className="flex shrink-0 flex-wrap items-center gap-2">
-                <span
-                  className={`rounded-full px-2 py-0.5 text-xs font-medium ${p.enabled ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300" : "bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400"
-                    }`}
-                >
-                  {p.enabled ? "enabled" : "disabled"}
-                </span>
+            ))
+          )}
+          <button
+            type="button"
+            onClick={() => onSelectBucket("applied")}
+            className={`flex h-full w-64 shrink-0 flex-col rounded-xl border p-4 text-left transition-colors ${bucketFilter === "applied"
+              ? "border-gray-900 bg-gray-100 dark:border-gray-100 dark:bg-gray-900"
+              : "border-gray-200 hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900/60"
+              }`}
+          >
+            <p className="text-sm font-semibold">Applied Jobs</p>
+          </button>
+          <button
+            type="button"
+            onClick={() => onSelectBucket("archived")}
+            className={`flex h-full w-64 shrink-0 flex-col rounded-xl border p-4 text-left transition-colors ${bucketFilter === "archived"
+              ? "border-gray-900 bg-gray-100 dark:border-gray-100 dark:bg-gray-900"
+              : "border-gray-200 hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900/60"
+              }`}
+          >
+            <p className="text-sm font-semibold">Archived Jobs</p>
+          </button>
+        </div>
+      </section>
+
+      <section className="flex min-h-0 flex-1 flex-col gap-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-3">
+            {!isBucket ? (
+              <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+                <input type="checkbox" checked={allSelected} onChange={toggleAll} />
+                Select all
+              </label>
+            ) : null}
+            {!isBucket && selected.size > 0 ? (
+              <>
+                <span className="text-sm text-gray-500 dark:text-gray-400">{selected.size} selected</span>
                 <button
                   type="button"
-                  onClick={() => void onToggle(p.id, !p.enabled)}
-                  className="rounded-md border border-gray-300 px-2 py-1 text-xs dark:border-gray-700"
+                  onClick={() => void runBulk("apply")}
+                  className="rounded-lg bg-gray-900 px-3 py-1.5 text-sm font-medium text-white dark:bg-gray-100 dark:text-gray-900"
                 >
-                  Toggle
+                  Mass apply
                 </button>
                 <button
                   type="button"
-                  onClick={() => void onEdit(p.id)}
-                  className="rounded-md border border-gray-300 px-2 py-1 text-xs dark:border-gray-700"
+                  onClick={() => void runBulk("mark")}
+                  className="rounded-lg border border-gray-300 px-3 py-1.5 text-sm dark:border-gray-600"
                 >
-                  Edit
+                  Mass mark applied
                 </button>
                 <button
                   type="button"
-                  onClick={() => void onDelete(p.id)}
-                  className="rounded-md border border-red-200 px-2 py-1 text-xs text-red-700 dark:border-red-900 dark:text-red-400"
+                  onClick={() => void runBulk("archive")}
+                  className="rounded-lg border border-gray-300 px-3 py-1.5 text-sm dark:border-gray-600"
                 >
-                  Delete
+                  Mass archive
                 </button>
-              </div>
-            </li>
-          ))
-        )}
-      </ul>
+              </>
+            ) : null}
+          </div>
+          <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+            <span>Sort</span>
+            <select
+              value={sortBy}
+              onChange={(ev) => setSortBy(ev.target.value as "alpha" | "retrieved" | "listed")}
+              className="rounded-md border border-gray-300 bg-white px-2 py-1 text-sm dark:border-gray-700 dark:bg-gray-900"
+            >
+              <option value="alpha">Alphabetical</option>
+              <option value="retrieved">Date retrieved</option>
+              <option value="listed">Date listed</option>
+            </select>
+          </label>
+        </div>
+        <div className="flex min-h-0 flex-1 overflow-hidden rounded-xl border border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-950">
+          {isBucket ? (
+            <div className="flex min-h-0 h-full w-full flex-col">
+              {bucketFilter === "applied" ? (
+                <div className="shrink-0 flex justify-end p-3 border-b border-gray-200 dark:border-gray-800">
+                  <button
+                    type="button"
+                    onClick={onEmailSync}
+                    disabled={emailSyncBusy}
+                    className="rounded-lg border border-gray-300 px-3 py-1.5 text-sm font-medium disabled:opacity-50 dark:border-gray-600"
+                  >
+                    {emailSyncBusy ? "Syncing…" : "Email sync"}
+                  </button>
+                </div>
+              ) : null}
+              <ul className="min-h-0 h-full w-full divide-y divide-gray-200 overflow-y-auto dark:divide-gray-800">
+                {sortedBucketJobs.length === 0 ? (
+                  <li className="px-4 py-8 text-center text-sm text-gray-500 dark:text-gray-400">No jobs in this bucket.</li>
+                ) : (
+                  sortedBucketJobs.map((j) => {
+                    const linkedins = parseStoredJsonStrings(j.linkedin_links);
+                    const contacts = parseStoredJsonStrings(j.hiring_contacts);
+                    const snapLi = parseStoredJsonStrings(j.applied_at_linkedin_links);
+                    const snapCt = parseStoredJsonStrings(j.applied_at_hiring_contacts);
+                    const applicationUrl = String(j.applied_application_url ?? "").trim() || j.apply_url;
+                    const emailBadge = emailStatusLabel(j.email_status);
+                    return (
+                      <li key={j.id} className="space-y-2 px-4 py-3">
+                        <div className="flex flex-wrap items-baseline justify-between gap-2">
+                          <p className="font-medium">{j.company}</p>
+                          <div className="flex items-center gap-2">
+                            {emailBadge ? (
+                              <span className={`text-xs font-medium ${emailBadge.color}`}>{emailBadge.label}</span>
+                            ) : null}
+                            <span className="text-xs text-gray-500 dark:text-gray-400">{j.status}</span>
+                          </div>
+                        </div>
+                        <p className="text-sm text-gray-700 dark:text-gray-300">{j.source_title}</p>
+                        <p className="text-xs text-gray-500 dark:text-gray-400">
+                          {j.applied_at ?? j.archived_at ?? j.discovered_at}
+                        </p>
+                        <div className="flex flex-wrap gap-2">
+                          <button type="button" onClick={() => void onRestoreJob(j.id)} className="text-sm text-blue-700 underline dark:text-blue-400">
+                            {bucketFilter === "archived" ? "Unarchive" : "Unapply"}
+                          </button>
+                          <button type="button" onClick={() => void onDeleteJob(j.id)} className="text-sm text-red-700 underline dark:text-red-400">
+                            Delete
+                          </button>
+                        </div>
+                        <CliJobDetailSections
+                          panel="statuses"
+                          summary={j.summary}
+                          compensationRange={j.compensation_range}
+                          location={j.location}
+                          companyHomepage={j.company_homepage}
+                          sourceUrl={j.source_url}
+                          listingText={j.listing_text}
+                          discoveredAt={j.discovered_at}
+                          linkedinLinks={linkedins}
+                          hiringContacts={contacts}
+                          appliedAt={j.applied_at}
+                          appliedApplicationUrl={bucketFilter === "applied" ? applicationUrl : null}
+                          appliedLinkedinSnapshot={snapLi}
+                          appliedContactsSnapshot={snapCt}
+                        />
+                      </li>
+                    );
+                  })
+                )}
+              </ul>
+            </div>
+          ) : (
+            <>
+              {sortedVisibleResultJobs.length === 0 ? (
+                <div className="p-4">
+                  <p className="text-sm text-gray-500 dark:text-gray-400">No result jobs.</p>
+                </div>
+              ) : (
+                <div className="min-h-0 h-full w-full overflow-auto">
+                  <div className="mx-auto grid max-w-[1490px] grid-cols-3 place-content-start justify-center gap-4 p-4">
+                    {sortedVisibleResultJobs.map((j) => (
+                      <JobResultCard
+                        key={j.id}
+                        job={j}
+                        selected={selected.has(j.id)}
+                        onToggleSelect={() => toggleOne(j.id)}
+                        onApply={() => void onChromeApply(j.id)}
+                        onViewListing={() => void openBackgroundTabViaExtension(j.source_url)}
+                        onMarkApplied={() => void onMarkApplied(j.id, normalizeApplyUrl(j.apply_url))}
+                        onArchive={() => void onArchive(j.id)}
+                        onViewContacts={() => void openContacts(j)}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </section>
+
+      {contactsJob ? (
+        <ContactsModal
+          job={contactsJob}
+          linkedinLinks={contactsLinkedin}
+          hiringContacts={contactsEmails}
+          busy={contactsBusy}
+          error={contactsError}
+          onClose={() => { setContactsJob(null); setContactsError(null); }}
+        />
+      ) : null}
     </div>
   );
 }
@@ -1488,167 +1733,6 @@ function emailStatusLabel(s: string | null): { label: string; color: string } | 
   if (s === "waiting") return { label: "Waiting for response", color: "text-blue-600 dark:text-blue-400" };
   if (s === "needs_action") return { label: "Needs attention", color: "text-amber-600 dark:text-amber-400" };
   return null;
-}
-
-function StatusesPanel(props: {
-  bucket: "archived" | "applied";
-  onBucket: (b: "archived" | "applied") => void;
-  jobs: BucketJobRow[];
-  onRestore: (jobId: string) => void;
-  onDelete: (jobId: string) => void;
-  emailSyncBusy: boolean;
-  onEmailSync: () => void;
-}) {
-  const { bucket, onBucket, jobs, onRestore, onDelete, emailSyncBusy, onEmailSync } = props;
-
-  return (
-    <div className="max-w-4xl space-y-6">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h2 className="text-xl font-semibold tracking-tight">Statuses</h2>
-          <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">Archived and dismissed, or applied jobs.</p>
-        </div>
-        {bucket === "applied" ? (
-          <button
-            type="button"
-            onClick={onEmailSync}
-            disabled={emailSyncBusy}
-            className="shrink-0 rounded-lg border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-800"
-          >
-            {emailSyncBusy ? "Syncing…" : "Email sync"}
-          </button>
-        ) : null}
-      </div>
-      <div className="flex gap-2">
-        <button
-          type="button"
-          onClick={() => onBucket("archived")}
-          className={`rounded-full px-3 py-1 text-sm ${bucket === "archived"
-            ? "bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900"
-            : "border border-gray-300 dark:border-gray-700"
-            }`}
-        >
-          Archived / dismissed
-        </button>
-        <button
-          type="button"
-          onClick={() => onBucket("applied")}
-          className={`rounded-full px-3 py-1 text-sm ${bucket === "applied"
-            ? "bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900"
-            : "border border-gray-300 dark:border-gray-700"
-            }`}
-        >
-          Applied
-        </button>
-      </div>
-      <ul className="divide-y divide-gray-200 rounded-xl border border-gray-200 dark:divide-gray-800 dark:border-gray-800">
-        {jobs.length === 0 ? (
-          <li className="px-4 py-8 text-center text-sm text-gray-500 dark:text-gray-400">No jobs in this bucket.</li>
-        ) : (
-          jobs.map((j) => {
-            const linkedins = parseStoredJsonStrings(j.linkedin_links);
-            const contacts = parseStoredJsonStrings(j.hiring_contacts);
-            const snapLi = parseStoredJsonStrings(j.applied_at_linkedin_links);
-            const snapCt = parseStoredJsonStrings(j.applied_at_hiring_contacts);
-            const applicationUrl = String(j.applied_application_url ?? "").trim() || j.apply_url;
-
-            const emailBadge = emailStatusLabel(j.email_status);
-
-            return (
-              <li key={j.id} className="space-y-2 px-4 py-3">
-                <div className="flex flex-wrap items-baseline justify-between gap-2">
-                  <p className="font-medium">{j.company}</p>
-                  <div className="flex items-center gap-2">
-                    {emailBadge ? (
-                      <span className={`text-xs font-medium ${emailBadge.color}`}>{emailBadge.label}</span>
-                    ) : null}
-                    <span className="text-xs text-gray-500 dark:text-gray-400">{j.status}</span>
-                  </div>
-                </div>
-                <p className="text-sm text-gray-700 dark:text-gray-300">{j.source_title}</p>
-                <p className="text-xs text-gray-500 dark:text-gray-400">
-                  {j.applied_at ?? j.archived_at ?? j.discovered_at}
-                </p>
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={() => void onRestore(j.id)}
-                    className="text-sm text-blue-700 underline dark:text-blue-400"
-                  >
-                    {bucket === "archived" ? "Unarchive" : "Unapply"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void onDelete(j.id)}
-                    className="text-sm text-red-700 underline dark:text-red-400"
-                  >
-                    Delete
-                  </button>
-                </div>
-                <CliJobDetailSections
-                  panel="statuses"
-                  summary={j.summary}
-                  compensationRange={j.compensation_range}
-                  location={j.location}
-                  companyHomepage={j.company_homepage}
-                  sourceUrl={j.source_url}
-                  listingText={j.listing_text}
-                  discoveredAt={j.discovered_at}
-                  linkedinLinks={linkedins}
-                  hiringContacts={contacts}
-                  appliedAt={j.applied_at}
-                  appliedApplicationUrl={bucket === "applied" ? applicationUrl : null}
-                  appliedLinkedinSnapshot={snapLi}
-                  appliedContactsSnapshot={snapCt}
-                />
-              </li>
-            );
-          })
-        )}
-      </ul>
-    </div>
-  );
-}
-
-function MetricsPanel(props: { rows: { day: string; retrieved: number; applied: number }[] }) {
-  const { rows } = props;
-
-  return (
-    <div className="max-w-3xl space-y-6">
-      <div>
-        <h2 className="text-xl font-semibold tracking-tight">Metrics</h2>
-        <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">Daily retrieved vs applied (last 14 days).</p>
-      </div>
-      <div className="overflow-x-auto rounded-xl border border-gray-200 dark:border-gray-800">
-        <table className="min-w-full text-sm">
-          <thead>
-            <tr className="border-b border-gray-200 bg-gray-50 dark:border-gray-800 dark:bg-gray-900/50">
-              <th className="px-4 py-2 text-left font-medium text-gray-600 dark:text-gray-400">Day</th>
-              <th className="px-4 py-2 text-right font-medium text-gray-600 dark:text-gray-400">Retrieved</th>
-              <th className="px-4 py-2 text-right font-medium text-gray-600 dark:text-gray-400">Applied</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.length === 0 ? (
-              <tr>
-                <td colSpan={3} className="px-4 py-8 text-center text-gray-500 dark:text-gray-400">
-                  No metric rows yet.
-                </td>
-              </tr>
-            ) : (
-              rows.map((r) => (
-                <tr key={r.day} className="border-b border-gray-100 dark:border-gray-900">
-                  <td className="px-4 py-2">{r.day}</td>
-                  <td className="px-4 py-2 text-right tabular-nums">{r.retrieved}</td>
-                  <td className="px-4 py-2 text-right tabular-nums">{r.applied}</td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
 }
 
 function configFieldStatus(value: string, options?: { secret?: boolean; multiline?: boolean }) {

@@ -16,6 +16,13 @@
   }
 
   async function resolvePayloadUrl() {
+    const sessionId = hash.get("jobmateSession");
+    if (sessionId) {
+      history.replaceState(null, document.title, location.pathname + location.search);
+      const payloadUrl = `ext://session/${sessionId}`;
+      await extensionMessage({ type: "JOBMATE_APPLY_SESSION_SET", payloadUrl }).catch(() => {});
+      return payloadUrl;
+    }
     const fromHash = hash.get("jobmatePayload");
     if (fromHash) {
       history.replaceState(null, document.title, location.pathname + location.search);
@@ -330,22 +337,18 @@
     return { elements, fieldItems };
   }
 
-  async function callStep(payloadUrl, step, history, hiddenApplyUrl, elements) {
-    const analyzeUrl = chromeApplySibling(payloadUrl, "analyze");
-    const res = await jobmateFetch(analyzeUrl, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        pageUrl: location.href,
-        pageText: clean(document.body?.textContent || "").slice(0, 2500),
-        stepIndex: step,
-        history,
-        hiddenApplyUrl: hiddenApplyUrl || null,
-        elements
-      })
+  async function callStep(step, history, hiddenApplyUrl, elements) {
+    const reply = await extensionMessage({
+      type: "JOBMATE_ANALYZE_PAGE",
+      pageUrl: location.href,
+      pageText: clean(document.body?.textContent || "").slice(0, 2500),
+      stepIndex: step,
+      history,
+      hiddenApplyUrl: hiddenApplyUrl || null,
+      elements
     });
-    if (!res.ok) throw new Error(`Analyze HTTP ${res.status}`);
-    return res.json();
+    if (!reply?.ok) throw new Error(reply?.error || "Analyze failed.");
+    return reply.action;
   }
 
   function fieldRoots() {
@@ -920,7 +923,7 @@
     return resumeElementIds;
   }
 
-  async function fillApplicationForm(payload, payloadUrl) {
+  async function fillApplicationForm(payload) {
     panel(["JobMate", "Opening cover letter text entry…"]);
     const manualReveal = await revealCoverLetterManualEntry();
     const fieldItems = controls();
@@ -929,18 +932,13 @@
       coverLetterFileIds.length > 0 && (!manualReveal || !hasCoverLetterTextField(fieldItems));
 
     panel(["JobMate", `Generating answers for ${fieldItems.length} fields…`]);
-    const answerUrl = chromeApplySibling(payloadUrl, "answers");
-    const answersRes = await jobmateFetch(answerUrl, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        fields: fieldItems.map((item) => item.field),
-        pageLanguage: detectPageLanguage()
-      })
+    const answersPayload = await extensionMessage({
+      type: "JOBMATE_FILL_ANSWERS",
+      fields: fieldItems.map((item) => item.field),
+      pageLanguage: detectPageLanguage()
     });
-    if (!answersRes.ok) throw new Error(`Answers HTTP ${answersRes.status}`);
+    if (!answersPayload?.ok) throw new Error(answersPayload?.error || "Answers generation failed.");
 
-    const answersPayload = await answersRes.json();
     const resumeElementIds = classifyResumeAttachmentFields(fieldItems, answersPayload.resumeFieldIds || []);
     const answers = new Map((answersPayload.answers || []).map((item) => [item.fieldId, item.answer || ""]));
 
@@ -980,18 +978,14 @@
 
     if (skippedItems.length > 0) {
       panel(["JobMate", `Retrying ${skippedItems.length} empty field(s)…`]);
-      const retryRes = await jobmateFetch(answerUrl, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          fields: skippedItems.map((item) => item.field),
-          pageLanguage: detectPageLanguage(),
-          retryNote: `These fields were left empty in the first pass. You MUST provide a non-empty answer for every field listed. Use every piece of candidate context available, including the resume PDF. Leaving any field empty is not permitted.`
-        })
-      });
+      const retryPayload = await extensionMessage({
+        type: "JOBMATE_FILL_ANSWERS",
+        fields: skippedItems.map((item) => item.field),
+        pageLanguage: detectPageLanguage(),
+        retryNote: `These fields were left empty in the first pass. You MUST provide a non-empty answer for every field listed. Use every piece of candidate context available, including the resume PDF. Leaving any field empty is not permitted.`
+      }).catch(() => null);
 
-      if (retryRes.ok) {
-        const retryPayload = await retryRes.json();
+      if (retryPayload?.ok) {
         const retryAnswers = new Map((retryPayload.answers || []).map((item) => [item.fieldId, item.answer || ""]));
         for (const item of skippedItems) {
           const answer = retryAnswers.get(item.field.fieldId) || "";
@@ -1085,7 +1079,7 @@
     });
   }
 
-  function showConfirmPanel(payloadUrl) {
+  function showConfirmPanel() {
     extensionMessage({
       type: "JOBMATE_APPLY_NEEDS_ATTENTION",
       message: "Application form filled — please review.",
@@ -1094,20 +1088,124 @@
       kind: "confirm"
     }).catch(() => {});
 
-    return showActionPanel({
-      id: "jobmate-confirm-wrap",
-      statusLines: ["JobMate: application form filled", "Review the form, then confirm below."],
-      btnLabel: "Confirm — looks good",
-      btnColor: "#059669",
-      onConfirm: async () => {
-        await jobmateFetch(chromeApplySibling(payloadUrl, "complete"), {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ applicationUrl: location.href })
-        }).catch(() => {});
-        await extensionMessage({ type: "JOBMATE_APPLY_SESSION_CLEAR" }).catch(() => {});
+    panel(["JobMate: application form filled", "Review the form, then confirm below."]);
+
+    return new Promise((resolve) => {
+      const existing = document.getElementById("jobmate-confirm-wrap");
+      if (existing) existing.remove();
+
+      const wrap = document.createElement("div");
+      wrap.id = "jobmate-confirm-wrap";
+      wrap.style.cssText = "position:fixed;right:16px;bottom:90px;z-index:2147483647;display:flex;flex-direction:column;gap:8px;max-width:360px;pointer-events:auto";
+
+      const fixBox = document.createElement("div");
+      fixBox.style.cssText = "background:#1f2937;color:#f9fafb;padding:10px 12px;border-radius:6px;font:13px/1.4 -apple-system,sans-serif;display:flex;flex-direction:column;gap:6px";
+
+      const fixHint = document.createElement("div");
+      fixHint.style.cssText = "font-size:11px;color:#9ca3af";
+      fixHint.textContent = "Click any field on this form to select it for correction";
+      fixBox.appendChild(fixHint);
+
+      const fixInput = document.createElement("input");
+      fixInput.type = "text";
+      fixInput.placeholder = "Describe the correction…";
+      fixInput.style.cssText = "width:100%;box-sizing:border-box;background:#374151;color:#f9fafb;border:1px solid #4b5563;border-radius:4px;padding:6px 8px;font:13px -apple-system,sans-serif;outline:none";
+      fixBox.appendChild(fixInput);
+
+      const fixBtn = document.createElement("button");
+      fixBtn.textContent = "Fix field";
+      fixBtn.disabled = true;
+      fixBtn.style.cssText = "background:#4b5563;color:white;border:none;padding:6px 12px;border-radius:4px;font:13px -apple-system,sans-serif;cursor:pointer;align-self:flex-end";
+      fixBox.appendChild(fixBtn);
+
+      wrap.appendChild(fixBox);
+
+      const confirmBtn = document.createElement("button");
+      confirmBtn.textContent = "Confirm — looks good";
+      confirmBtn.style.cssText = "background:#059669;color:white;border:none;padding:10px 16px;border-radius:6px;font:14px -apple-system,sans-serif;cursor:pointer;width:100%";
+      confirmBtn.onclick = async () => {
+        confirmBtn.disabled = true;
+        confirmBtn.textContent = "Working…";
+        cleanupPickMode();
+        await extensionMessage({ type: "JOBMATE_SESSION_COMPLETE", applicationUrl: location.href }).catch(() => {});
+        wrap.remove();
         panel(["JobMate: confirmed ✓", "Submit the application when ready."]);
+        resolve();
+      };
+      wrap.appendChild(confirmBtn);
+
+      document.body.appendChild(wrap);
+
+      let selectedItem = null;
+      let highlightedNode = null;
+      let originalOutline = "";
+
+      function cleanupPickMode() {
+        if (highlightedNode) {
+          highlightedNode.style.outline = originalOutline;
+          highlightedNode = null;
+        }
+        document.removeEventListener("click", onFormFieldClick, true);
       }
+
+      function onFormFieldClick(ev) {
+        if (wrap.contains(ev.target)) return;
+        let node = ev.target;
+        while (node && node !== document.body) {
+          if (node.dataset && node.dataset.jobmateFieldId) {
+            ev.stopPropagation();
+            ev.preventDefault();
+            const fieldId = node.dataset.jobmateFieldId;
+            const items = controls();
+            const item = items.find((i) => i.field.fieldId === fieldId);
+            if (item) {
+              if (highlightedNode && highlightedNode !== node) {
+                highlightedNode.style.outline = originalOutline;
+              }
+              selectedItem = item;
+              highlightedNode = node;
+              originalOutline = node.style.outline;
+              node.style.outline = "2px solid #059669";
+              fixHint.textContent = `Selected: "${item.field.label || fieldId}"`;
+              fixBtn.disabled = false;
+            }
+            return;
+          }
+          node = node.parentElement;
+        }
+      }
+
+      document.addEventListener("click", onFormFieldClick, true);
+
+      fixBtn.onclick = async () => {
+        const note = fixInput.value.trim();
+        if (!selectedItem || !note) return;
+        fixBtn.disabled = true;
+        fixBtn.textContent = "Fixing…";
+
+        const data = await extensionMessage({
+          type: "JOBMATE_FILL_ANSWERS",
+          fields: [selectedItem.field],
+          retryNote: `User correction for field "${selectedItem.field.label}": ${note}`
+        }).catch(() => null);
+
+        if (data?.ok) {
+          const answer = (data.answers || []).find((a) => a.fieldId === selectedItem.field.fieldId)?.answer || "";
+          if (answer) {
+            await fillControl(selectedItem, answer, true);
+          }
+        }
+
+        if (highlightedNode) {
+          highlightedNode.style.outline = originalOutline;
+          highlightedNode = null;
+        }
+        selectedItem = null;
+        fixInput.value = "";
+        fixHint.textContent = "Click any field on this form to select it for correction";
+        fixBtn.textContent = "Fix field";
+        fixBtn.disabled = true;
+      };
     });
   }
 
@@ -1123,7 +1221,7 @@
       applyUrl: location.href
     }).catch(() => {});
 
-    return showActionPanel({
+    const result = await showActionPanel({
       id: "jobmate-help-wrap",
       statusLines: ["⚠ JobMate needs your help", whatHappened, instruction],
       btnLabel: "Continue",
@@ -1131,6 +1229,9 @@
       alertTitle: "Needs attention",
       onConfirm: null
     });
+    resetUrlPingPongTrack();
+    await extensionMessage({ type: "JOBMATE_RESET_URL_OSCILLATION" }).catch(() => {});
+    return result;
   }
 
   function panel(lines) {
@@ -1225,10 +1326,60 @@
     return false;
   }
 
+  const urlPingPongTrack = { a: null, b: null, last: null, switches: 0 };
+  let listingAutoNavigateUsed = false;
+
+  function resetUrlPingPongTrack() {
+    urlPingPongTrack.a = null;
+    urlPingPongTrack.b = null;
+    urlPingPongTrack.last = null;
+    urlPingPongTrack.switches = 0;
+  }
+
+  function recordUrlPingPong(href) {
+    const u = normalizeHref(href);
+    if (!u) return false;
+    if (u === urlPingPongTrack.last) return urlPingPongTrack.switches >= 3;
+    if (!urlPingPongTrack.a) {
+      urlPingPongTrack.a = u;
+      urlPingPongTrack.last = u;
+      return false;
+    }
+    if (!urlPingPongTrack.b && u !== urlPingPongTrack.a) {
+      urlPingPongTrack.b = u;
+      urlPingPongTrack.last = u;
+      urlPingPongTrack.switches = 1;
+      return false;
+    }
+    if (u === urlPingPongTrack.a || u === urlPingPongTrack.b) {
+      urlPingPongTrack.switches += 1;
+      urlPingPongTrack.last = u;
+      return urlPingPongTrack.switches >= 3;
+    }
+    return false;
+  }
+
+  async function stopUrlPingPong() {
+    await requestHumanHelp(
+      "Stopped: the page kept switching between the same two URLs.",
+      "Open the job application page directly, then click Continue."
+    );
+  }
+
   function navigateToTargetListingIfNeeded(applyUrl) {
     const targetNorm = normalizeHref(applyUrl);
     if (normalizeHref(location.href) === targetNorm) {
       return false;
+    }
+
+    const host = location.hostname.replace(/^www\./i, "").toLowerCase();
+    const onCompany = /\/companies\//i.test(location.pathname);
+    const targetIsJob = /\/jobs\//i.test(applyUrl);
+    if (host === "workatastartup.com" && onCompany && targetIsJob) {
+      if (listingAutoNavigateUsed || urlPingPongTrack.switches >= 1) {
+        return false;
+      }
+      listingAutoNavigateUsed = true;
     }
 
     const targetJobId = jobIdFromApplyUrl(applyUrl);
@@ -1268,9 +1419,9 @@
     }
 
     panel("JobMate: loading payload…");
-    const payloadRes = await jobmateFetch(payloadUrl);
-    if (!payloadRes.ok) throw new Error(`Payload HTTP ${payloadRes.status}`);
-    const payload = await payloadRes.json();
+    const payloadResp = await extensionMessage({ type: "JOBMATE_GET_PAYLOAD" });
+    if (!payloadResp?.ok) throw new Error(payloadResp?.error || "Could not load payload.");
+    const payload = payloadResp.payload;
 
     panel("JobMate: waiting for page to load…");
     await waitForPageLoad();
@@ -1309,6 +1460,11 @@
 
       await waitForPageLoad();
 
+      if (recordUrlPingPong(location.href)) {
+        await stopUrlPingPong();
+        continue;
+      }
+
       const targetApplyUrl = String(payload.applyUrl || "").trim();
       if (
         targetApplyUrl &&
@@ -1332,8 +1488,8 @@
           handledForms.add(formKey);
           failuresByState.delete(stateBefore);
           panel(["JobMate", `Application form — ${fieldItems.length} fields`, "Generating answers…"]);
-          await fillApplicationForm(payload, payloadUrl);
-          await showConfirmPanel(payloadUrl);
+          await fillApplicationForm(payload);
+          await showConfirmPanel();
           return;
         }
 
@@ -1379,7 +1535,7 @@
       }
 
       panel([`JobMate · step ${step + 1}/${MAX_STEPS}`, "Navigating…"]);
-      const action = await callStep(payloadUrl, step, history, hiddenApplyUrl, elements);
+      const action = await callStep(step, history, hiddenApplyUrl, elements);
       const histEntry = {
         step,
         tool: action.tool,
