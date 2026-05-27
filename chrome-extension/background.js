@@ -1,3 +1,5 @@
+importScripts("jobmate-app-url.js");
+
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -421,14 +423,92 @@ function parseJsonObjectExt(text) {
   throw new Error("LLM output did not contain a complete JSON object.");
 }
 
+const EXTENSION_CONFIG_STORAGE_KEYS = [
+  "geminiApiKey",
+  "geminiModel",
+  "candidateName",
+  "candidateEmail",
+  "contextBlock",
+  "writingSample",
+  "coverLetterTemplate",
+  "resumePdfBase64",
+  "resumePdfFilename",
+  "resumePdfMimeType"
+];
+
 function getExtensionConfig() {
   return new Promise((resolve) => {
-    chrome.storage.local.get(
-      ["geminiApiKey", "geminiModel", "candidateName", "candidateEmail", "contextBlock", "writingSample", "coverLetterTemplate", "resumePdfBase64", "resumePdfFilename", "resumePdfMimeType"],
-      resolve
-    );
+    chrome.storage.local.get(EXTENSION_CONFIG_STORAGE_KEYS, resolve);
   });
 }
+
+function applyExtensionConfigFromApp(config) {
+  if (!config || typeof config !== "object") {
+    return Promise.resolve(false);
+  }
+  const updates = {};
+  for (const key of EXTENSION_CONFIG_STORAGE_KEYS) {
+    const value = config[key];
+    if (typeof value === "string") {
+      updates[key] = value;
+    }
+  }
+  return new Promise((resolve) => {
+    chrome.storage.local.set(updates, () => resolve(true));
+  });
+}
+
+async function fetchAppConfigFromTab(tabId) {
+  return chrome.tabs.sendMessage(tabId, { type: "JOBMATE_FETCH_APP_CONFIG" });
+}
+
+async function shouldSyncConfigFromApp() {
+  const stored = await new Promise((resolve) => chrome.storage.local.get(["needsConfigFromApp"], resolve));
+  if (stored.needsConfigFromApp) {
+    return true;
+  }
+  const cfg = await getExtensionConfig();
+  return !String(cfg.geminiApiKey ?? "").trim();
+}
+
+async function syncExtensionConfigFromTab(tabId) {
+  const resp = await fetchAppConfigFromTab(tabId);
+  if (!resp?.ok || !resp.config) {
+    return false;
+  }
+  await applyExtensionConfigFromApp(resp.config);
+  await new Promise((resolve) => chrome.storage.local.set({ needsConfigFromApp: false }, resolve));
+  return true;
+}
+
+async function syncExtensionConfigFromJobMateApp() {
+  if (!(await shouldSyncConfigFromApp())) {
+    return false;
+  }
+
+  const tabs = await chrome.tabs.query({});
+  for (const tab of tabs) {
+    if (!tab.id || !tab.url || !isJobMateAppUrl(tab.url)) {
+      continue;
+    }
+    try {
+      if (await syncExtensionConfigFromTab(tab.id)) {
+        return true;
+      }
+    } catch {}
+  }
+
+  return false;
+}
+
+chrome.runtime.onInstalled.addListener((details) => {
+  if (details.reason !== "install") {
+    return;
+  }
+  chrome.storage.local.set({ needsConfigFromApp: true }, () => {
+    void syncExtensionConfigFromJobMateApp();
+  });
+});
 
 async function callGeminiExt(parts, apiKey, primaryModel, json = false) {
   const models = [...new Set([primaryModel || GEMINI_FALLBACK_MODELS[0], ...GEMINI_FALLBACK_MODELS])];
@@ -785,6 +865,44 @@ function setApplySession(tabId, payloadUrl, openerTabId) {
 
 chrome.action.onClicked.addListener((tab) => {
   chrome.sidePanel.open({ windowId: tab.windowId }).catch(() => {});
+});
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg?.type === "JOBMATE_APP_PAGE_READY") {
+    (async () => {
+      const tabId = sender.tab?.id;
+      if (!tabId) {
+        sendResponse({ ok: false });
+        return;
+      }
+      if (!(await shouldSyncConfigFromApp())) {
+        sendResponse({ ok: true, synced: false });
+        return;
+      }
+      try {
+        const synced = await syncExtensionConfigFromTab(tabId);
+        sendResponse({ ok: synced, synced });
+      } catch {
+        sendResponse({ ok: false });
+      }
+    })();
+    return true;
+  }
+
+  if (msg?.type === "JOBMATE_APPLY_EXTENSION_CONFIG") {
+    (async () => {
+      if (!msg.config) {
+        sendResponse({ ok: false });
+        return;
+      }
+      await applyExtensionConfigFromApp(msg.config);
+      await new Promise((resolve) => chrome.storage.local.set({ needsConfigFromApp: false }, resolve));
+      sendResponse({ ok: true });
+    })();
+    return true;
+  }
+
+  return false;
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
@@ -1745,7 +1863,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         for (const tab of tabs) {
           const url = tab.url || "";
           if (!tab.id || tab.id === applyTabId) continue;
-          if (!/localhost|127\.0\.0\.1/.test(url)) continue;
+          if (!isJobMateAppUrl(url)) continue;
           await chrome.tabs.sendMessage(tab.id, payload).catch(() => {});
         }
       }

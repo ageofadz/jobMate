@@ -22,6 +22,7 @@ import type { JobmateSqlite } from "./sqlite-client";
 import { BrowserProfileWizard, BrowserSetupWizard } from "./startup-wizard";
 import { useJobmateSqlite } from "./sqlite-context";
 import { openBackgroundTabViaExtension } from "./extension-open-tab";
+import { loadExtensionConfigFromSqlite } from "./extension-config";
 import { JOBMATE_EXTENSION_VERSION, pingExtensionVersion } from "./extension-version";
 import { ContactsModal, JobResultCard, type ResultJobRow } from "./results-panel";
 
@@ -196,6 +197,58 @@ export function JobmateApp() {
       cancelled = true;
     };
   }, [setupGateResolved, setupComplete]);
+
+  useEffect(() => {
+    if (!sqlite || userId === null || !setupGateResolved || !setupComplete) {
+      return;
+    }
+    const db: JobmateSqlite = sqlite;
+    const uid: string = userId;
+
+    async function onConfigRequest(ev: MessageEvent) {
+      const data = ev.data as {
+        source?: string;
+        type?: string;
+        requestId?: string;
+      };
+      if (!data || data.source !== "jobmate-extension" || data.type !== "JOBMATE_WEB_CONFIG_REQUEST") {
+        return;
+      }
+      const requestId = data.requestId;
+      if (!requestId) {
+        return;
+      }
+
+      try {
+        const config = await loadExtensionConfigFromSqlite(db, uid);
+        window.postMessage(
+          {
+            source: "jobmate-web",
+            type: "JOBMATE_WEB_CONFIG",
+            requestId,
+            ok: true,
+            config
+          },
+          "*"
+        );
+      } catch (err) {
+        window.postMessage(
+          {
+            source: "jobmate-web",
+            type: "JOBMATE_WEB_CONFIG",
+            requestId,
+            ok: false,
+            error: err instanceof Error ? err.message : String(err)
+          },
+          "*"
+        );
+      }
+    }
+
+    window.addEventListener("message", onConfigRequest);
+    window.postMessage({ source: "jobmate-web", type: "JOBMATE_WEB_APP_READY" }, "*");
+    return () => window.removeEventListener("message", onConfigRequest);
+  }, [sqlite, userId, setupGateResolved, setupComplete]);
 
   useEffect(() => {
     const failRefresh = (action: string) => {

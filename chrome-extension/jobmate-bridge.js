@@ -1,4 +1,4 @@
-chrome.runtime.onMessage.addListener((msg) => {
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === "JOBMATE_APPLY_ATTENTION") {
     window.postMessage(
       {
@@ -27,8 +27,47 @@ chrome.runtime.onMessage.addListener((msg) => {
     return;
   }
 
+  if (msg?.type === "JOBMATE_FETCH_APP_CONFIG") {
+    const requestId = crypto.randomUUID();
+
+    function onPageReply(ev) {
+      if (ev.source !== window) {
+        return;
+      }
+      const d = ev.data;
+      if (!d || d.source !== "jobmate-web" || d.type !== "JOBMATE_WEB_CONFIG" || d.requestId !== requestId) {
+        return;
+      }
+      window.removeEventListener("message", onPageReply);
+      sendResponse({
+        ok: Boolean(d.ok),
+        config: d.config ?? null,
+        error: typeof d.error === "string" ? d.error : null
+      });
+    }
+
+    window.addEventListener("message", onPageReply);
+    window.postMessage(
+      {
+        source: "jobmate-extension",
+        type: "JOBMATE_WEB_CONFIG_REQUEST",
+        requestId
+      },
+      "*"
+    );
+
+    return true;
+  }
 });
 
+function notifyJobMateAppPageReady() {
+  if (!isJobMateAppUrl(location.href)) {
+    return;
+  }
+  chrome.runtime.sendMessage({ type: "JOBMATE_APP_PAGE_READY" }).catch(() => {});
+}
+
+notifyJobMateAppPageReady();
 
 window.addEventListener("message", (ev) => {
   if (ev.source !== window) {
@@ -38,6 +77,11 @@ window.addEventListener("message", (ev) => {
   const d = ev.data;
 
   if (!d || d.source !== "jobmate-web") {
+    return;
+  }
+
+  if (d.type === "JOBMATE_WEB_APP_READY") {
+    notifyJobMateAppPageReady();
     return;
   }
 
