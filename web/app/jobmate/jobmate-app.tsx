@@ -13,6 +13,7 @@ import {
   SETTING_GEMINI_MODEL,
   SETTING_INITIAL_SETUP_COMPLETE,
   SETTING_LANGUAGE,
+  SETTING_HOME_SORT_BY,
   SETTING_NOTIFICATION_WEBHOOK_URL,
   SETTING_SERPAPI_API_KEY
 } from "./kv-keys";
@@ -27,11 +28,19 @@ import { JOBMATE_EXTENSION_VERSION, pingExtensionVersion } from "./extension-ver
 import { ContactsModal, JobResultCard, type ResultJobRow } from "./results-panel";
 
 type PageId = "home" | "config";
+type HomeSortBy = "alpha" | "retrieved" | "listed";
 
 const NAV: { id: PageId; label: string }[] = [
   { id: "home", label: "Home" },
   { id: "config", label: "Config" }
 ];
+
+function parseHomeSortBy(value: string): HomeSortBy {
+  if (value === "alpha" || value === "retrieved" || value === "listed") {
+    return value;
+  }
+  throw new Error(`Invalid home sort setting: ${value}`);
+}
 
 function parseStoredJsonStrings(raw: string | null | undefined): string[] {
   if (raw === undefined || raw === null || raw === "") {
@@ -93,6 +102,7 @@ export function JobmateApp() {
   const [resultJobs, setResultJobs] = useState<ResultJobRow[]>([]);
   const [bucketJobs, setBucketJobs] = useState<BucketJobRow[]>([]);
   const [perTargetLimit, setPerTargetLimit] = useState(20);
+  const [homeSortBy, setHomeSortBy] = useState<HomeSortBy>("listed");
 
   const [applySessions, setApplySessions] = useState<Array<{
     jobId: string;
@@ -369,6 +379,58 @@ export function JobmateApp() {
     };
   }, [sqlite, userId]);
 
+  useEffect(() => {
+    if (!sqlite || userId === null || !setupGateResolved || !setupComplete) {
+      return;
+    }
+
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const rows = await sqlite.all<{ value: string }>(
+          "SELECT value FROM kv_settings WHERE key = ?",
+          [SETTING_HOME_SORT_BY]
+        );
+
+        if (cancelled) {
+          return;
+        }
+
+        if (rows.length > 0) {
+          setHomeSortBy(parseHomeSortBy(rows[0].value));
+        } else {
+          await sqlite.run(`INSERT OR REPLACE INTO kv_settings (key, value) VALUES (?, ?)`, [
+            SETTING_HOME_SORT_BY,
+            "listed"
+          ]);
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setFetchError(e instanceof Error ? e.message : String(e));
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [sqlite, userId, setupGateResolved, setupComplete]);
+
+  const saveHomeSortBy = useCallback(
+    async (nextSortBy: HomeSortBy) => {
+      if (!sqlite || userId === null) {
+        throw new Error("Cannot save sort setting before the database and user are ready.");
+      }
+      await sqlite.run(`INSERT OR REPLACE INTO kv_settings (key, value) VALUES (?, ?)`, [
+        SETTING_HOME_SORT_BY,
+        nextSortBy
+      ]);
+      setHomeSortBy(nextSortBy);
+    },
+    [sqlite, userId]
+  );
+
   const loadPage = useCallback(async () => {
     if (!sqlite || userId === null) {
       return;
@@ -613,14 +675,23 @@ export function JobmateApp() {
       [jobId, userId]
     );
     const row = rows[0];
+    if (!row) {
+      throw new Error(`Cannot mark missing job as applied: ${jobId}`);
+    }
     const now = new Date().toISOString();
-    const contacts = row?.hiring_contacts ?? "[]";
-    const links = row?.linkedin_links ?? "[]";
+    const contacts = row.hiring_contacts;
+    const links = row.linkedin_links;
+    if (contacts === null || links === null) {
+      throw new Error(`Cannot snapshot empty contact fields for job: ${jobId}`);
+    }
     await sqlite.run(
       `UPDATE jobs SET status = ?, applied_at = ?, applied_application_url = ?, applied_at_hiring_contacts = ?, applied_at_linkedin_links = ?, updated_at = ? WHERE id = ? AND user_id = ?`,
       ["applied", now, applyUrl, contacts, links, now, jobId, userId]
     );
-    bumpData();
+    setResultJobs((prev) => prev.filter((job) => job.id !== jobId));
+    if (bucketFilter === "applied") {
+      void loadBucketJobs("applied");
+    }
   }
 
   async function unarchiveRow(jobId: string) {
@@ -729,8 +800,12 @@ export function JobmateApp() {
     if (!sqlite || !userId) {
       return;
     }
-    await markAppliedRow(jobId, applyUrl);
-    setApplySessions(prev => prev.filter(s => s.jobId !== jobId));
+    try {
+      await markAppliedRow(jobId, applyUrl);
+      setApplySessions(prev => prev.filter(s => s.jobId !== jobId));
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    }
   }
 
   async function archiveFromApplySession(jobId: string) {
@@ -1035,6 +1110,8 @@ export function JobmateApp() {
             prefs={prefs}
             resultJobs={filteredResults}
             bucketJobs={bucketJobs}
+            sortBy={homeSortBy}
+            onSortByChange={saveHomeSortBy}
             selectedTargetIds={selectedTargetIds}
             bucketFilter={bucketFilter}
             onToggleTarget={toggleTargetSelection}
@@ -1203,6 +1280,8 @@ function HomePanel(props: {
   }[];
   resultJobs: ResultJobRow[];
   bucketJobs: BucketJobRow[];
+  sortBy: HomeSortBy;
+  onSortByChange: (sortBy: HomeSortBy) => Promise<void>;
   selectedTargetIds: Set<string>;
   bucketFilter: null | "applied" | "archived";
   onToggleTarget: (id: string) => void;
@@ -1227,7 +1306,7 @@ function HomePanel(props: {
   onEmailSync: () => void;
 }) {
   const {
-    prefs, resultJobs, bucketJobs, selectedTargetIds, bucketFilter, onToggleTarget, onSelectBucket,
+    prefs, resultJobs, bucketJobs, sortBy, onSortByChange, selectedTargetIds, bucketFilter, onToggleTarget, onSelectBucket,
     perTargetLimit, onPerTargetLimitChange,
     ingestRunning, onRunSearch, onAdd, onEdit, onDelete,
     confirmClearHistory, setConfirmClearHistory, onClearHistory,
@@ -1241,7 +1320,7 @@ function HomePanel(props: {
   const [contactsEmails, setContactsEmails] = useState<string[]>([]);
   const [contactsBusy, setContactsBusy] = useState(false);
   const [contactsError, setContactsError] = useState<string | null>(null);
-  const [sortBy, setSortBy] = useState<"alpha" | "retrieved" | "listed">("retrieved");
+  const [targetsOpen, setTargetsOpen] = useState(false);
 
   const isBucket = bucketFilter !== null;
   const visibleResultJobs = isBucket ? [] : (selectedTargetIds.size === 0 ? resultJobs : resultJobs.filter((j) => selectedTargetIds.has(j.preference_id)));
@@ -1266,10 +1345,18 @@ function HomePanel(props: {
       const job = visibleResultJobs.find((j) => j.id === id);
       if (!job) continue;
       if (action === "apply") await onChromeApply(job.id);
-      else if (action === "mark") await onMarkApplied(job.id, normalizeApplyUrl(job.apply_url));
+      else if (action === "mark") await markJobApplied(job);
       else await onArchive(job.id);
     }
     setSelected(new Set());
+  }
+
+  async function markJobApplied(job: ResultJobRow) {
+    try {
+      await onMarkApplied(job.id, normalizeApplyUrl(job.apply_url));
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    }
   }
 
   async function openContacts(job: ResultJobRow) {
@@ -1289,6 +1376,14 @@ function HomePanel(props: {
       setContactsError(e instanceof Error ? e.message : String(e));
     } finally {
       setContactsBusy(false);
+    }
+  }
+
+  async function changeSort(value: string) {
+    try {
+      await onSortByChange(parseHomeSortBy(value));
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -1358,8 +1453,43 @@ function HomePanel(props: {
 
       <section className="shrink-0 space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300">Targets</h3>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setTargetsOpen((open) => !open)}
+              className="rounded-md border border-gray-300 px-2.5 py-1 text-xs font-medium hover:bg-gray-50 dark:border-gray-700 dark:hover:bg-gray-900/60"
+              aria-expanded={targetsOpen}
+            >
+              {targetsOpen ? "Hide targets" : "Show targets"}
+            </button>
+            <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300">
+              Targets
+              <span className="ml-2 text-xs font-normal text-gray-500 dark:text-gray-400">
+                {selectedTargetIds.size} selected
+              </span>
+            </h3>
+          </div>
           <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => onSelectBucket("applied")}
+              className={`rounded-md border px-2.5 py-1 text-xs font-medium ${bucketFilter === "applied"
+                ? "border-gray-900 bg-gray-100 dark:border-gray-100 dark:bg-gray-900"
+                : "border-gray-300 hover:bg-gray-50 dark:border-gray-700 dark:hover:bg-gray-900/60"
+                }`}
+            >
+              Applied Jobs
+            </button>
+            <button
+              type="button"
+              onClick={() => onSelectBucket("archived")}
+              className={`rounded-md border px-2.5 py-1 text-xs font-medium ${bucketFilter === "archived"
+                ? "border-gray-900 bg-gray-100 dark:border-gray-100 dark:bg-gray-900"
+                : "border-gray-300 hover:bg-gray-50 dark:border-gray-700 dark:hover:bg-gray-900/60"
+                }`}
+            >
+              Archived Jobs
+            </button>
             <button
               type="button"
               onClick={onAdd}
@@ -1395,85 +1525,87 @@ function HomePanel(props: {
             )}
           </div>
         </div>
-        <div className="flex gap-3 overflow-x-auto pb-1">
-          {prefs.length === 0 ? (
-            <div className="rounded-xl border border-gray-200 px-4 py-6 text-center text-sm text-gray-500 dark:border-gray-800 dark:text-gray-400">
-              No targets yet. Add one to get started.
-            </div>
-          ) : (
-            prefs.map((p) => (
-              <div
-                key={p.id}
-                onClick={() => onToggleTarget(p.id)}
-                className={`flex h-full w-64 shrink-0 cursor-pointer flex-col rounded-xl border p-4 transition-colors ${selectedTargetIds.has(p.id)
-                  ? "border-gray-900 bg-gray-100 dark:border-gray-100 dark:bg-gray-900"
-                  : "border-gray-200 hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900/60"
-                  }`}
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0 flex-1 text-left">
-                    <p className={`text-sm font-semibold wrap-break-word ${selectedTargetIds.has(p.id) ? "text-gray-900 dark:text-gray-100" : "text-gray-800 dark:text-gray-200"}`}>
-                      {p.title}
+        {targetsOpen ? (
+          <div className="flex gap-3 overflow-x-auto pb-1">
+            {prefs.length === 0 ? (
+              <div className="rounded-xl border border-gray-200 px-4 py-6 text-center text-sm text-gray-500 dark:border-gray-800 dark:text-gray-400">
+                No targets yet. Add one to get started.
+              </div>
+            ) : (
+              prefs.map((p) => (
+                <div
+                  key={p.id}
+                  onClick={() => onToggleTarget(p.id)}
+                  className={`flex h-full w-64 shrink-0 cursor-pointer flex-col rounded-xl border p-4 transition-colors ${selectedTargetIds.has(p.id)
+                    ? "border-gray-900 bg-gray-100 dark:border-gray-100 dark:bg-gray-900"
+                    : "border-gray-200 hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900/60"
+                    }`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1 text-left">
+                      <p className={`text-sm font-semibold wrap-break-word ${selectedTargetIds.has(p.id) ? "text-gray-900 dark:text-gray-100" : "text-gray-800 dark:text-gray-200"}`}>
+                        {p.title}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="mt-2 space-y-1 text-[11px] leading-snug text-gray-500 dark:text-gray-400">
+                    <p className="wrap-break-word">
+                      Keywords: {parseStoredJsonStrings(p.keyword_seed).join(", ") || "—"}
+                    </p>
+                    <p className="wrap-break-word">
+                      Locations: {parseStoredJsonStrings(p.locations).join(", ") || "—"}
+                    </p>
+                    <p className="wrap-break-word">
+                      Site targets: {parseStoredJsonStrings(p.board_domains).join(", ") || "—"}
                     </p>
                   </div>
+                  <div className="mt-auto pt-3 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={(ev) => {
+                        ev.stopPropagation();
+                        void onEdit(p.id);
+                      }}
+                      className="rounded-md border border-gray-300 px-2 py-1 text-xs hover:bg-gray-50 dark:border-gray-700 dark:hover:bg-gray-900/60"
+                    >
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(ev) => {
+                        ev.stopPropagation();
+                        void onDelete(p.id);
+                      }}
+                      className="rounded-md border border-red-200 px-2 py-1 text-xs text-red-700 hover:bg-red-50 dark:border-red-900 dark:text-red-400 dark:hover:bg-red-950/30"
+                    >
+                      Delete
+                    </button>
+                  </div>
                 </div>
-                <div className="mt-2 space-y-1 text-[11px] leading-snug text-gray-500 dark:text-gray-400">
-                  <p className="wrap-break-word">
-                    Keywords: {parseStoredJsonStrings(p.keyword_seed).join(", ") || "—"}
-                  </p>
-                  <p className="wrap-break-word">
-                    Locations: {parseStoredJsonStrings(p.locations).join(", ") || "—"}
-                  </p>
-                  <p className="wrap-break-word">
-                    Site targets: {parseStoredJsonStrings(p.board_domains).join(", ") || "—"}
-                  </p>
-                </div>
-                <div className="mt-auto pt-3 flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={(ev) => {
-                      ev.stopPropagation();
-                      void onEdit(p.id);
-                    }}
-                    className="rounded-md border border-gray-300 px-2 py-1 text-xs hover:bg-gray-50 dark:border-gray-700 dark:hover:bg-gray-900/60"
-                  >
-                    Edit
-                  </button>
-                  <button
-                    type="button"
-                    onClick={(ev) => {
-                      ev.stopPropagation();
-                      void onDelete(p.id);
-                    }}
-                    className="rounded-md border border-red-200 px-2 py-1 text-xs text-red-700 hover:bg-red-50 dark:border-red-900 dark:text-red-400 dark:hover:bg-red-950/30"
-                  >
-                    Delete
-                  </button>
-                </div>
-              </div>
-            ))
-          )}
-          <button
-            type="button"
-            onClick={() => onSelectBucket("applied")}
-            className={`flex h-full w-64 shrink-0 flex-col rounded-xl border p-4 text-left transition-colors ${bucketFilter === "applied"
-              ? "border-gray-900 bg-gray-100 dark:border-gray-100 dark:bg-gray-900"
-              : "border-gray-200 hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900/60"
-              }`}
-          >
-            <p className="text-sm font-semibold">Applied Jobs</p>
-          </button>
-          <button
-            type="button"
-            onClick={() => onSelectBucket("archived")}
-            className={`flex h-full w-64 shrink-0 flex-col rounded-xl border p-4 text-left transition-colors ${bucketFilter === "archived"
-              ? "border-gray-900 bg-gray-100 dark:border-gray-100 dark:bg-gray-900"
-              : "border-gray-200 hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900/60"
-              }`}
-          >
-            <p className="text-sm font-semibold">Archived Jobs</p>
-          </button>
-        </div>
+              ))
+            )}
+            <button
+              type="button"
+              onClick={() => onSelectBucket("applied")}
+              className={`flex h-full w-64 shrink-0 flex-col rounded-xl border p-4 text-left transition-colors ${bucketFilter === "applied"
+                ? "border-gray-900 bg-gray-100 dark:border-gray-100 dark:bg-gray-900"
+                : "border-gray-200 hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900/60"
+                }`}
+            >
+              <p className="text-sm font-semibold">Applied Jobs</p>
+            </button>
+            <button
+              type="button"
+              onClick={() => onSelectBucket("archived")}
+              className={`flex h-full w-64 shrink-0 flex-col rounded-xl border p-4 text-left transition-colors ${bucketFilter === "archived"
+                ? "border-gray-900 bg-gray-100 dark:border-gray-100 dark:bg-gray-900"
+                : "border-gray-200 hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900/60"
+                }`}
+            >
+              <p className="text-sm font-semibold">Archived Jobs</p>
+            </button>
+          </div>
+        ) : null}
       </section>
 
       <section className="flex min-h-0 flex-1 flex-col gap-4">
@@ -1516,7 +1648,7 @@ function HomePanel(props: {
             <span>Sort</span>
             <select
               value={sortBy}
-              onChange={(ev) => setSortBy(ev.target.value as "alpha" | "retrieved" | "listed")}
+              onChange={(ev) => void changeSort(ev.target.value)}
               className="rounded-md border border-gray-300 bg-white px-2 py-1 text-sm dark:border-gray-700 dark:bg-gray-900"
             >
               <option value="alpha">Alphabetical</option>
@@ -1613,7 +1745,7 @@ function HomePanel(props: {
                         onToggleSelect={() => toggleOne(j.id)}
                         onApply={() => void onChromeApply(j.id)}
                         onViewListing={() => void openBackgroundTabViaExtension(j.source_url)}
-                        onMarkApplied={() => void onMarkApplied(j.id, normalizeApplyUrl(j.apply_url))}
+                        onMarkApplied={() => void markJobApplied(j)}
                         onArchive={() => void onArchive(j.id)}
                         onViewContacts={() => void openContacts(j)}
                       />
