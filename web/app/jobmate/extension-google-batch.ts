@@ -1,4 +1,4 @@
-import type { OrganicSearchResult } from "../../../lib/services/serp-shared";
+import type { OrganicSearchResult } from "../../../lib/services/organic-search";
 
 type BatchPayload = {
   source: string;

@@ -11,14 +11,13 @@ import { buildCoverLetterDocx } from "@/lib/services/docx";
 import { enrichJobLeadMetadata } from "@/lib/services/job-enrichment";
 import { parseJobPage } from "@/lib/services/job-page";
 import { sendDigestNotification } from "@/lib/services/notifications";
-import { searchGoogleListings } from "@/lib/services/serp";
 import type { JobRecord, PreferenceRecord } from "@/lib/types";
 import { nowInTimezoneParts } from "@/lib/utils";
 
 export type IngestionProgress =
   | { stage: "target"; targetTitle: string; targetIndex: number; targetTotal: number }
   | {
-      stage: "serp_queries";
+      stage: "search_queries";
       targetTitle: string;
       targetIndex: number;
       targetTotal: number;
@@ -46,6 +45,12 @@ export async function runIngestion(options: {
   let totalRetrieved = 0;
   const perTargetLimit = Math.max(1, Math.min(options.perTargetLimit ?? 100, 100));
 
+  if (prefs.length > 0) {
+    throw new Error(
+      "CLI job search requires the JobMate web app and Chrome extension. Run search from the web dashboard with the extension installed."
+    );
+  }
+
   for (let prefIndex = 0; prefIndex < prefs.length; prefIndex++) {
     const row = prefs[prefIndex];
     const preference = preferenceRowToRecord(row);
@@ -69,20 +74,8 @@ export async function runIngestion(options: {
       scheduleHourLocal: preference.scheduleHourLocal
     });
 
-    const candidates = await searchGoogleListings(searchQueries, {
-      limit: perTargetLimit,
-      boardDomains: preference.boardDomains,
-      onQueryDone: (_query, _count, meta) => {
-        options.onProgress?.({
-          stage: "serp_queries",
-          targetTitle: preference.title,
-          targetIndex: prefIndex + 1,
-          targetTotal: prefs.length,
-          completed: meta.completedQueries,
-          total: meta.totalQueries
-        });
-      }
-    });
+    void searchQueries;
+    const candidates: { sourceUrl: string }[] = [];
     totalRetrieved += candidates.length;
     options.onProgress?.({
       stage: "retrieved",

@@ -1933,6 +1933,34 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg?.type === "JOBMATE_INTERRUPT_APPLY_TAB") {
+    (async () => {
+      const tabId = typeof msg.tabId === "number" ? msg.tabId : null;
+      if (!tabId) {
+        sendResponse({ ok: false, error: "Missing apply tab id." });
+        return;
+      }
+
+      const applyTab = await chrome.tabs.get(tabId).catch(() => null);
+      if (!applyTab?.id) {
+        sendResponse({ ok: false, error: "Apply tab not found." });
+        return;
+      }
+
+      await chrome.tabs
+        .sendMessage(tabId, {
+          type: "JOBMATE_FORCE_INTERRUPT",
+          reason: "Interrupted by user.",
+          instruction: "Complete the action needed to unblock this application, then click Continue."
+        })
+        .catch(() => {});
+      await chrome.windows.update(applyTab.windowId, { focused: true }).catch(() => {});
+      await chrome.tabs.update(tabId, { active: true }).catch(() => {});
+      sendResponse({ ok: true });
+    })();
+    return true;
+  }
+
   if (msg?.type === "JOBMATE_APPLY_IS_RUNNER") {
     const tabId = sender.tab?.id;
     const payloadUrl = typeof msg.payloadUrl === "string" ? msg.payloadUrl.trim() : "";

@@ -1,6 +1,6 @@
 # JobMate (CLI)
 
-Local SQLite CLI dashboard: SerpApi discovery, scraped listings, AI-filled answers, Chrome-extension assisted apply flow, and daily search/application metrics.
+Local SQLite CLI dashboard: Chrome-extension Google search and discovery, scraped listings, AI-filled answers, assisted apply flow, and daily search/application metrics.
 
 ## Run
 
@@ -11,7 +11,7 @@ npm start
 
 Optional: copy `.env.example` to `.env.local` and set `'./data'`.
 
-On first launch, the app asks for your **profile** (name, email, location, phone, LinkedIn, preferred compensation range, work history, optional cover letter template) and stores it only on disk, then the first-time **config** step asks for SerpApi / Gemini keys, optional webhook, your **website**, and **skills** (SQLite). After that you get a **full-screen terminal dashboard** (Ink).
+On first launch, the app asks for your **profile** (name, email, location, phone, LinkedIn, preferred compensation range, work history, optional cover letter template) and stores it only on disk, then the first-time **config** step asks for Gemini keys, optional webhook, your **website**, and **skills** (SQLite). Job search uses the **Chrome extension** from the web dashboard. After setup you get a **full-screen terminal dashboard** (Ink).
 
 ## Dashboard
 

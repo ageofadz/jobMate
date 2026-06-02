@@ -12,7 +12,7 @@ import {
   type WorkAtAStartupSearchSpec
 } from "../../../lib/services/workatstartup";
 import type { ParsedJobPage, SearchCandidate } from "../../../lib/types";
-import { searchGoogleListingsWithOrganicFetcher, type OrganicSearchResult } from "../../../lib/services/serp-shared";
+import { searchGoogleListingsWithOrganicFetcher, type OrganicSearchResult } from "../../../lib/services/organic-search";
 
 import { enrichPreferenceInput, preferenceInputSchema, type PreferenceInput } from "./browser-preference";
 import { fetchGoogleOrganicViaExtensionBatch } from "./extension-google-batch";
@@ -36,69 +36,6 @@ function shorten(text: string, max: number) {
 
 function ingestErrMessage(err: unknown) {
   return err instanceof Error ? err.message : String(err);
-}
-
-type SerpApiOrganicResult = {
-  title?: string;
-  link?: string;
-  displayed_link?: string;
-  snippet?: string;
-};
-
-type SerpApiResponse = {
-  organic_results?: SerpApiOrganicResult[];
-};
-
-const SERP_PROXY_REQUEST_MS = 90_000;
-
-async function fetchSerpJson(apiKey: string, query: string, num: number, start: number): Promise<SerpApiResponse> {
-  const res = await fetch("/api/serp", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ apiKey, query, num, start }),
-    signal: AbortSignal.timeout(SERP_PROXY_REQUEST_MS)
-  });
-
-  const payload = (await res.json()) as SerpApiResponse & { error?: string };
-
-  if (!res.ok) {
-    throw new Error(payload.error ?? `SerpApi proxy failed: ${res.status}`);
-  }
-
-  return payload;
-}
-
-async function searchGoogleOrganicBrowser(apiKey: string, query: string, limit: number): Promise<OrganicSearchResult[]> {
-  const cappedLimit = Math.max(1, Math.min(limit, 100));
-  const collected: OrganicSearchResult[] = [];
-  const pageSize = Math.min(10, cappedLimit);
-
-  for (let start = 0; start < cappedLimit; start += pageSize) {
-    let payload: SerpApiResponse;
-
-    try {
-      payload = await fetchSerpJson(apiKey, query, Math.min(pageSize, cappedLimit - start), start);
-    } catch {
-      break;
-    }
-
-    const pageResults = (payload.organic_results ?? [])
-      .filter((result): result is SerpApiOrganicResult & { link: string } => Boolean(result.link))
-      .map((result) => ({
-        title: result.title ?? "Untitled",
-        link: result.link,
-        displayedLink: result.displayed_link ?? "",
-        snippet: result.snippet ?? ""
-      }));
-
-    collected.push(...pageResults);
-
-    if (pageResults.length < Math.min(pageSize, cappedLimit - start)) {
-      break;
-    }
-  }
-
-  return collected.slice(0, cappedLimit);
 }
 
 function nowInTimezoneParts(timezone: string, date = new Date()) {
@@ -290,7 +227,6 @@ function preferenceRowToInput(row: Record<string, unknown>): PreferenceInput {
 export async function runBrowserIngestion(opts: {
   sqlite: JobmateSqlite;
   userId: string;
-  serpApiKey: string;
   geminiApiKey: string | null;
   geminiModel: string;
   webhookUrl?: string;
@@ -408,10 +344,10 @@ export async function runBrowserIngestion(opts: {
       });
     }
 
-    let extensionOrganicByTrimmed: Map<string, OrganicSearchResult[]> | null = null;
-
     const trimmedForExt = enriched.searchQueries.map((q) => q.trim()).filter(Boolean);
     const uniqQueriesForExt = [...new Set(trimmedForExt)];
+
+    const extensionOrganicByTrimmed = new Map<string, OrganicSearchResult[]>();
 
     if (uniqQueriesForExt.length) {
       opts.onProgress?.({
@@ -420,70 +356,40 @@ export async function runBrowserIngestion(opts: {
         detail: `${uniqQueriesForExt.length} quer${uniqQueriesForExt.length === 1 ? "y" : "ies"}`
       });
 
-      const acc = new Map<string, OrganicSearchResult[]>();
+      for (let qi = 0; qi < uniqQueriesForExt.length; qi++) {
+        const q = uniqQueriesForExt[qi];
 
-      try {
-        for (let qi = 0; qi < uniqQueriesForExt.length; qi++) {
-          const q = uniqQueriesForExt[qi];
+        opts.onProgress?.({
+          kind: "phase",
+          step: "Google search (Chrome extension)",
+          detail: `Query ${qi + 1} of ${uniqQueriesForExt.length}`
+        });
 
-          opts.onProgress?.({
-            kind: "phase",
-            step: "Google search (Chrome extension)",
-            detail: `Query ${qi + 1} of ${uniqQueriesForExt.length}`
-          });
-
-          opts.onProgress?.({
-            kind: "log",
-            line: `Searching: ${shorten(q, 160)}`
-          });
-
-          const part = await fetchGoogleOrganicViaExtensionBatch([q], perTargetLimit);
-          const rows = part.get(q) ?? [];
-          acc.set(q, rows);
-
-          const hostSample = rows
-            .slice(0, 5)
-            .map((r) => {
-              try {
-                return new URL(r.link).hostname.replace(/^www\./i, "");
-              } catch {
-                return shorten(r.link, 36);
-              }
-            })
-            .join(", ");
-
-          opts.onProgress?.({
-            kind: "log",
-            line: `Collected ${rows.length} organic URLs${hostSample ? `: ${hostSample}${rows.length > 5 ? ", …" : ""}` : ""}`
-          });
-        }
-
-        extensionOrganicByTrimmed = acc;
-      } catch {
-        extensionOrganicByTrimmed = null;
         opts.onProgress?.({
           kind: "log",
-          line: "Chrome extension search failed; using SerpApi if a key is configured."
+          line: `Searching: ${shorten(q, 160)}`
+        });
+
+        const part = await fetchGoogleOrganicViaExtensionBatch([q], perTargetLimit);
+        const rows = part.get(q) ?? [];
+        extensionOrganicByTrimmed.set(q, rows);
+
+        const hostSample = rows
+          .slice(0, 5)
+          .map((r) => {
+            try {
+              return new URL(r.link).hostname.replace(/^www\./i, "");
+            } catch {
+              return shorten(r.link, 36);
+            }
+          })
+          .join(", ");
+
+        opts.onProgress?.({
+          kind: "log",
+          line: `Collected ${rows.length} organic URLs${hostSample ? `: ${hostSample}${rows.length > 5 ? ", …" : ""}` : ""}`
         });
       }
-    }
-
-    const serpKey = opts.serpApiKey.trim();
-
-    if (uniqQueriesForExt.length > 0 && !extensionOrganicByTrimmed && !serpKey) {
-      throw new Error(
-        "SerpApi API key is missing. Add it in Config, or load the JobMate Chrome extension for in-browser Google search."
-      );
-    }
-
-    const sourceLabel = extensionOrganicByTrimmed ? "Chrome extension" : "SerpApi";
-
-    if (!extensionOrganicByTrimmed && enriched.searchQueries.length) {
-      opts.onProgress?.({
-        kind: "phase",
-        step: "Google search (SerpApi)",
-        detail: `${enriched.searchQueries.length} quer${enriched.searchQueries.length === 1 ? "y" : "ies"}`
-      });
     }
 
     const googleCandidates =
@@ -491,29 +397,12 @@ export async function runBrowserIngestion(opts: {
         ? await searchGoogleListingsWithOrganicFetcher(
             enriched.searchQueries,
             (q, lim) => {
-              if (extensionOrganicByTrimmed) {
-                const rows = extensionOrganicByTrimmed.get(q.trim()) ?? [];
-                return Promise.resolve(rows.slice(0, lim));
-              }
-
-              return searchGoogleOrganicBrowser(serpKey, q, lim);
+              const rows = extensionOrganicByTrimmed.get(q.trim()) ?? [];
+              return Promise.resolve(rows.slice(0, lim));
             },
             {
               limit: perTargetLimit,
-              boardDomains: enriched.boardDomains,
-              onQueryDone: extensionOrganicByTrimmed
-                ? undefined
-                : (query, count, meta) => {
-                    opts.onProgress?.({
-                      kind: "phase",
-                      step: `Google search (${sourceLabel})`,
-                      detail: `${meta.completedQueries}/${meta.totalQueries}`
-                    });
-                    opts.onProgress?.({
-                      kind: "log",
-                      line: `${shorten(query, 140)} → ${count} organic URLs`
-                    });
-                  }
+              boardDomains: enriched.boardDomains
             }
           )
         : [];
@@ -551,7 +440,7 @@ export async function runBrowserIngestion(opts: {
     const mergedSourceLabels = [
       jobTeaserEnabled ? "JobTeaser" : "",
       workAtAStartupEnabled ? "Work at a Startup" : "",
-      enriched.searchQueries.length > 0 ? `Google (${sourceLabel})` : "",
+      enriched.searchQueries.length > 0 ? "Google (Chrome extension)" : "",
       googleJobsCandidates.length > 0 ? "Google Jobs" : ""
     ].filter(Boolean);
 
@@ -563,7 +452,7 @@ export async function runBrowserIngestion(opts: {
     });
     opts.onProgress?.({
       kind: "log",
-      line: `Merged ${candidates.length} candidate listing URL${candidates.length === 1 ? "" : "s"} (${jobTeaserEnabled || workAtAStartupEnabled ? mergedSourceLabels.join(" + ") : sourceLabel}).`
+      line: `Merged ${candidates.length} candidate listing URL${candidates.length === 1 ? "" : "s"} (${mergedSourceLabels.join(" + ") || "none"}).`
     });
 
     const profileBlock = profileRow ? formatProfileBlock(profileRow) : "";
@@ -823,7 +712,6 @@ export async function runBrowserIngestion(opts: {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              serpApiKey: opts.serpApiKey.trim(),
               geminiApiKey: opts.geminiApiKey ?? "",
               geminiModel: opts.geminiModel,
               title: parsed.title,

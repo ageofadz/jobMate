@@ -106,3 +106,42 @@ export function openApplyTabViaExtension(applyUrl: string, sessionId: string, jo
     );
   });
 }
+
+export function interruptApplyTabViaExtension(tabId: number): Promise<void> {
+  if (typeof window === "undefined") {
+    throw new Error("Extension interrupt requires a browser window.");
+  }
+
+  return new Promise((resolve, reject) => {
+    const requestId = crypto.randomUUID();
+    const timer = window.setTimeout(() => {
+      window.removeEventListener("message", onReply);
+      reject(new Error("JobMate extension did not respond to the interrupt request."));
+    }, 60_000);
+
+    function onReply(ev: MessageEvent) {
+      const data = ev.data as ExtensionReply;
+      if (!data || data.source !== "jobmate-extension" || data.requestId !== requestId) {
+        return;
+      }
+      window.removeEventListener("message", onReply);
+      window.clearTimeout(timer);
+      if (!data.ok) {
+        reject(new Error(data.error || "Extension interrupt failed."));
+        return;
+      }
+      resolve();
+    }
+
+    window.addEventListener("message", onReply);
+    window.postMessage(
+      {
+        source: "jobmate-web",
+        type: "JOBMATE_INTERRUPT_APPLY_TAB",
+        requestId,
+        tabId
+      },
+      "*"
+    );
+  });
+}

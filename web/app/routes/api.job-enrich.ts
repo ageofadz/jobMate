@@ -2,7 +2,6 @@ import type { ActionFunctionArgs } from "react-router";
 
 import { enrichJobLeadMetadata, extractCompensationRange } from "../../../lib/services/job-enrichment";
 import { generateJobDetailsSummary } from "../../../lib/services/llm";
-import { searchGoogleOrganicWithApiKey } from "../../../lib/services/serp";
 
 export async function action({ request }: ActionFunctionArgs) {
   if (request.method !== "POST") {
@@ -10,7 +9,6 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   let body: {
-    serpApiKey?: string;
     geminiApiKey?: string;
     geminiModel?: string | null;
     title?: string;
@@ -31,8 +29,6 @@ export async function action({ request }: ActionFunctionArgs) {
   } catch {
     return Response.json({ error: "Invalid JSON" }, { status: 400 });
   }
-
-  const serpApiKey = typeof body.serpApiKey === "string" ? body.serpApiKey.trim() : "";
 
   const company = typeof body.company === "string" ? body.company : "";
   const title = typeof body.title === "string" ? body.title.trim() : "";
@@ -56,11 +52,6 @@ export async function action({ request }: ActionFunctionArgs) {
     typeof body.parsedCompensationRange === "string" ? body.parsedCompensationRange.trim() : body.parsedCompensationRange ?? null;
   const includeLeadSearch = body.includeLeadSearch === true;
 
-  const fetchOrganic =
-    serpApiKey.length > 0
-      ? (query: string, limit: number) => searchGoogleOrganicWithApiKey(serpApiKey, query, limit)
-      : (_query: string, _limit: number) => Promise.resolve([]);
-
   let compensationRange = parsedCompensationRange ?? extractCompensationRange(listingText);
   let companyHomepage = parsedHomepage?.trim() ? parsedHomepage : null;
   let linkedinLinks: string[] = [];
@@ -72,8 +63,7 @@ export async function action({ request }: ActionFunctionArgs) {
       listingText,
       sourceUrl,
       parsedHomepage: parsedHomepage ?? null,
-      parsedLinkedinLinks,
-      fetchOrganic
+      parsedLinkedinLinks
     });
     compensationRange = leadMetadata.compensationRange ?? compensationRange;
     companyHomepage = leadMetadata.companyHomepage ?? companyHomepage;

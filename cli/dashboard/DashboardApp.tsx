@@ -240,8 +240,8 @@ export function DashboardApp({ userId, onExit }: DashboardAppProps) {
       return `Searching target ${progress.targetIndex}/${progress.targetTotal}: ${progress.targetTitle}`;
     }
 
-    if (progress.stage === "serp_queries") {
-      return `Target ${progress.targetIndex}/${progress.targetTotal} ${progress.targetTitle}: SerpApi ${progress.completed}/${progress.total} queries`;
+    if (progress.stage === "search_queries") {
+      return `Target ${progress.targetIndex}/${progress.targetTotal} ${progress.targetTitle}: Google search ${progress.completed}/${progress.total} queries`;
     }
 
     if (progress.stage === "retrieved") {

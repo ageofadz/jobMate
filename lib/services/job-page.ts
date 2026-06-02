@@ -361,14 +361,14 @@ function extractCompanyLogoUrl($: cheerio.CheerioAPI, sourceUrl: string, jsonLdL
   return null;
 }
 
-function pickListingTitle(jsonLdTitle: string, domTitle: string, serpFallback: string): string {
+function pickListingTitle(jsonLdTitle: string, domTitle: string, listingTitleFallback: string): string {
   const norm = (value: string) => value.replace(/\s+/g, " ").trim();
   const fromLd = norm(jsonLdTitle);
   if (fromLd.length >= 2 && fromLd.length <= 240) {
     return fromLd;
   }
   const dom = norm(domTitle);
-  const fb = norm(serpFallback);
+  const fb = norm(listingTitleFallback);
   if (dom.length > 110 && fb.length >= 2 && fb.length < dom.length) {
     return fb;
   }

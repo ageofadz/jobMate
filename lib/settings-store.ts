@@ -1,6 +1,5 @@
 import { getSqlite } from "@/lib/db";
 
-export const SETTING_SERPAPI_API_KEY = "serpapi_api_key";
 export const SETTING_GEMINI_API_KEY = "gemini_api_key";
 export const SETTING_GEMINI_MODEL = "gemini_model";
 export const SETTING_NOTIFICATION_WEBHOOK_URL = "notification_webhook_url";
@@ -18,10 +17,6 @@ export function getSetting(key: string): string | null {
 export function setSetting(key: string, value: string) {
   const db = getSqlite();
   db.prepare(`INSERT OR REPLACE INTO kv_settings (key, value) VALUES (?, ?)`).run(key, value);
-}
-
-export function getSerpApiKey() {
-  return getSetting(SETTING_SERPAPI_API_KEY) ?? undefined;
 }
 
 export function getGeminiApiKey() {

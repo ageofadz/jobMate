@@ -2,7 +2,6 @@ import { type RouteConfig, index, route } from "@react-router/dev/routes";
 
 export default [
   index("routes/home.tsx"),
-  route("api/serp", "routes/api.serp.ts"),
   route("api/fetch-html", "routes/api.fetch-html.ts"),
   route("api/job-logo", "routes/api.job-logo.ts"),
   route("api/parse-job", "routes/api.parse-job.ts"),

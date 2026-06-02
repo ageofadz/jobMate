@@ -1,7 +1,6 @@
 import type { ActionFunctionArgs } from "react-router";
 
 import { enrichJobLeadMetadata } from "../../../lib/services/job-enrichment";
-import { searchGoogleOrganicWithApiKey } from "../../../lib/services/serp";
 
 export async function action({ request }: ActionFunctionArgs) {
   if (request.method !== "POST") {
@@ -9,7 +8,6 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   let body: {
-    serpApiKey?: string;
     company?: string;
     listingText?: string;
     sourceUrl?: string;
@@ -22,7 +20,6 @@ export async function action({ request }: ActionFunctionArgs) {
     return Response.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  const serpApiKey = typeof body.serpApiKey === "string" ? body.serpApiKey.trim() : "";
   const company = typeof body.company === "string" ? body.company.trim() : "";
   const listingText = typeof body.listingText === "string" ? body.listingText : "";
   const sourceUrl = typeof body.sourceUrl === "string" ? body.sourceUrl.trim() : "";
@@ -32,18 +29,12 @@ export async function action({ request }: ActionFunctionArgs) {
     return Response.json({ error: "listingText and sourceUrl are required" }, { status: 400 });
   }
 
-  const fetchOrganic =
-    serpApiKey.length > 0
-      ? (query: string, limit: number) => searchGoogleOrganicWithApiKey(serpApiKey, query, limit)
-      : (_query: string, _limit: number) => Promise.resolve([]);
-
   const leadMetadata = await enrichJobLeadMetadata({
     company,
     listingText,
     sourceUrl,
     parsedHomepage: parsedHomepage ?? null,
-    parsedLinkedinLinks: [],
-    fetchOrganic
+    parsedLinkedinLinks: []
   });
 
   return Response.json({

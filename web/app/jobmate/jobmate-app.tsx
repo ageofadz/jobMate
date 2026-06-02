@@ -4,7 +4,7 @@ import { toast } from "sonner";
 
 import { normalizeApplyUrl } from "@/lib/apply-url";
 
-import { openApplyTabViaExtension } from "./extension-open-tab";
+import { interruptApplyTabViaExtension, openApplyTabViaExtension } from "./extension-open-tab";
 import { runBrowserIngestion } from "./browser-ingest";
 import { classifyJobEmailStatus } from "./gemini-field-answers";
 import {
@@ -14,15 +14,16 @@ import {
   SETTING_INITIAL_SETUP_COMPLETE,
   SETTING_LANGUAGE,
   SETTING_HOME_SORT_BY,
-  SETTING_NOTIFICATION_WEBHOOK_URL,
-  SETTING_SERPAPI_API_KEY
+  SETTING_NOTIFICATION_WEBHOOK_URL
 } from "./kv-keys";
 import { PreferenceEditorModal } from "./preference-editor";
 import { insertResumePdfAsset, setUserResumeAsset } from "./browser-resume-asset";
 import type { JobmateSqlite } from "./sqlite-client";
 import { BrowserProfileWizard, BrowserSetupWizard } from "./startup-wizard";
 import { useJobmateSqlite } from "./sqlite-context";
+import { fetchGoogleOrganicViaExtensionBatch } from "./extension-google-batch";
 import { openBackgroundTabViaExtension } from "./extension-open-tab";
+import { enrichJobLeadMetadata } from "../../../lib/services/job-enrichment";
 import { loadExtensionConfigFromSqlite } from "./extension-config";
 import { JOBMATE_EXTENSION_VERSION, pingExtensionVersion } from "./extension-version";
 import { ContactsModal, JobResultCard, type ResultJobRow } from "./results-panel";
@@ -534,9 +535,6 @@ export function JobmateApp() {
       return;
     }
 
-    const serpRows = await sqlite.all<{ value: string }>("SELECT value FROM kv_settings WHERE key = ?", [
-      SETTING_SERPAPI_API_KEY
-    ]);
     const gemRows = await sqlite.all<{ value: string }>("SELECT value FROM kv_settings WHERE key = ?", [
       SETTING_GEMINI_API_KEY
     ]);
@@ -556,7 +554,6 @@ export function JobmateApp() {
       const result = await runBrowserIngestion({
         sqlite,
         userId,
-        serpApiKey: serpRows[0]?.value ?? "",
         geminiApiKey: gemRows[0]?.value?.trim() ? gemRows[0].value : null,
         geminiModel: modRows[0]?.value?.trim() || "gemini-3.1-flash-lite",
         webhookUrl: hookRows[0]?.value?.trim() ?? "",
@@ -923,41 +920,28 @@ export function JobmateApp() {
       throw new Error("Database not ready.");
     }
 
-    const serpRows = await sqlite.all<{ value: string }>("SELECT value FROM kv_settings WHERE key = ?", [
-      SETTING_SERPAPI_API_KEY
-    ]);
-    const serpApiKey = serpRows[0]?.value?.trim() ?? "";
-
-    const res = await fetch("/api/job-contacts", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        serpApiKey,
-        company: job.company,
-        listingText: job.listing_text,
-        sourceUrl: job.source_url,
-        parsedHomepage: job.company_homepage
-      })
-    });
-
-    const data = (await res.json()) as {
-      error?: string;
-      linkedinLinks?: string[];
-      hiringContacts?: string[];
-      companyHomepage?: string | null;
+    const fetchOrganic = async (query: string, limit: number) => {
+      const batch = await fetchGoogleOrganicViaExtensionBatch([query], limit);
+      return batch.get(query) ?? [];
     };
 
-    if (!res.ok) {
-      throw new Error(data.error ?? `Contacts fetch failed (${res.status})`);
-    }
+    const leadMetadata = await enrichJobLeadMetadata({
+      company: job.company,
+      listingText: job.listing_text,
+      sourceUrl: job.source_url,
+      parsedHomepage: job.company_homepage,
+      parsedLinkedinLinks: [],
+      fetchOrganic
+    });
 
-    const linkedinLinks = Array.isArray(data.linkedinLinks) ? data.linkedinLinks.map(String) : [];
-    const hiringContacts = Array.isArray(data.hiringContacts) ? data.hiringContacts.map(String) : [];
+    const linkedinLinks = leadMetadata.linkedinLinks;
+    const hiringContacts = leadMetadata.hiringContacts;
+    const companyHomepage = leadMetadata.companyHomepage ?? job.company_homepage;
     const now = new Date().toISOString();
 
     await sqlite.run(
       `UPDATE jobs SET linkedin_links = ?, hiring_contacts = ?, company_homepage = COALESCE(?, company_homepage), updated_at = ? WHERE id = ? AND user_id = ?`,
-      [JSON.stringify(linkedinLinks), JSON.stringify(hiringContacts), data.companyHomepage ?? null, now, job.id, userId]
+      [JSON.stringify(linkedinLinks), JSON.stringify(hiringContacts), companyHomepage, now, job.id, userId]
     );
     bumpData();
 
@@ -1068,6 +1052,16 @@ export function JobmateApp() {
           onDismiss={() => setApplySessions(prev => prev.filter(x => x.jobId !== s.jobId))}
           onDoneApplying={() => void doneApplying(s.jobId, s.applyUrl)}
           onArchive={() => void archiveFromApplySession(s.jobId)}
+          onInterrupt={() => {
+            const tabId = typeof s.tabId === "number" ? s.tabId : null;
+            if (tabId === null) {
+              toast.error("Could not find the active apply tab.");
+              return;
+            }
+            void interruptApplyTabViaExtension(tabId).catch((err) => {
+              toast.error(err instanceof Error ? err.message : String(err));
+            });
+          }}
         />
       ))}
       {extensionVersionModal ? (
@@ -1214,8 +1208,9 @@ function ApplySessionBadge(props: {
   onDismiss: () => void;
   onDoneApplying: () => void;
   onArchive: () => void;
+  onInterrupt: () => void;
 }) {
-  const { session, index, onDismiss, onDoneApplying, onArchive } = props;
+  const { session, index, onDismiss, onDoneApplying, onArchive, onInterrupt } = props;
   const isAttention = session.needsAttention;
   const topOffset = 16 + index * 220;
 
@@ -1250,6 +1245,13 @@ function ApplySessionBadge(props: {
         <div className="px-4 pb-3 space-y-2">
           <button
             type="button"
+            onClick={onInterrupt}
+            className="w-full rounded-lg border border-amber-300 px-3 py-2 text-sm font-medium text-amber-700 hover:bg-amber-50 dark:border-amber-800 dark:text-amber-400 dark:hover:bg-amber-950/30"
+          >
+            Interrupt
+          </button>
+          <button
+            type="button"
             onClick={onDoneApplying}
             className="w-full rounded-lg bg-emerald-600 px-3 py-2 text-sm font-medium text-white hover:bg-emerald-700"
           >
@@ -1263,7 +1265,17 @@ function ApplySessionBadge(props: {
             Archive
           </button>
         </div>
-      ) : null}
+      ) : (
+        <div className="px-4 pb-3">
+          <button
+            type="button"
+            onClick={onInterrupt}
+            className="w-full rounded-lg border border-amber-300 px-3 py-2 text-sm font-medium text-amber-700 hover:bg-amber-50 dark:border-amber-800 dark:text-amber-400 dark:hover:bg-amber-950/30"
+          >
+            Interrupt
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -1944,7 +1956,6 @@ function ConfigPanel(props: {
 }) {
   const { sqlite, userId, profile, bumpData, dataEpoch } = props;
   const [language, setLanguage] = useState<"en" | "fr">("en");
-  const [serpApiKey, setSerpApiKey] = useState("");
   const [geminiApiKey, setGeminiApiKey] = useState("");
   const [geminiModel, setGeminiModel] = useState("gemini-3.1-flash-lite");
   const [webhook, setWebhook] = useState("");
@@ -1961,7 +1972,6 @@ function ConfigPanel(props: {
   const [skills, setSkills] = useState("");
   const [essay, setEssay] = useState("");
   const [savedLanguage, setSavedLanguage] = useState<"en" | "fr">("en");
-  const [savedSerpApiKey, setSavedSerpApiKey] = useState("");
   const [savedGeminiApiKey, setSavedGeminiApiKey] = useState("");
   const [savedGeminiModel, setSavedGeminiModel] = useState("gemini-3.1-flash-lite");
   const [savedWebhook, setSavedWebhook] = useState("");
@@ -1993,9 +2003,6 @@ function ConfigPanel(props: {
       const langRows = await sqlite.all<{ value: string }>("SELECT value FROM kv_settings WHERE key = ?", [
         SETTING_LANGUAGE
       ]);
-      const serp = await sqlite.all<{ value: string }>("SELECT value FROM kv_settings WHERE key = ?", [
-        SETTING_SERPAPI_API_KEY
-      ]);
       const gem = await sqlite.all<{ value: string }>("SELECT value FROM kv_settings WHERE key = ?", [
         SETTING_GEMINI_API_KEY
       ]);
@@ -2014,20 +2021,17 @@ function ConfigPanel(props: {
       }
 
       const nextLanguage = langRows[0]?.value === "fr" ? "fr" : "en";
-      const nextSerp = serp[0]?.value ?? "";
       const nextGem = gem[0]?.value ?? "";
       const nextModel = mod[0]?.value?.trim() ? String(mod[0].value) : "gemini-3.1-flash-lite";
       const nextWebhook = hook[0]?.value ?? "";
       const nextApplyEmail = apply[0]?.value ?? "";
 
       setLanguage(nextLanguage);
-      setSerpApiKey(nextSerp);
       setGeminiApiKey(nextGem);
       setGeminiModel(nextModel);
       setWebhook(nextWebhook);
       setApplyEmail(nextApplyEmail);
       setSavedLanguage(nextLanguage);
-      setSavedSerpApiKey(nextSerp);
       setSavedGeminiApiKey(nextGem);
       setSavedGeminiModel(nextModel);
       setSavedWebhook(nextWebhook);
@@ -2112,14 +2116,12 @@ function ConfigPanel(props: {
 
     try {
       const nextLanguage = language;
-      const nextSerp = serpApiKey.trim();
       const nextGem = geminiApiKey.trim();
       const nextModel = geminiModel.trim() || "gemini-3.1-flash-lite";
       const nextWebhook = webhook.trim();
       const nextApplyEmail = applyEmail.trim();
 
       await sqlite.run(`INSERT OR REPLACE INTO kv_settings (key, value) VALUES (?, ?)`, [SETTING_LANGUAGE, nextLanguage]);
-      await sqlite.run(`INSERT OR REPLACE INTO kv_settings (key, value) VALUES (?, ?)`, [SETTING_SERPAPI_API_KEY, nextSerp]);
       await sqlite.run(`INSERT OR REPLACE INTO kv_settings (key, value) VALUES (?, ?)`, [SETTING_GEMINI_API_KEY, nextGem]);
       await sqlite.run(`INSERT OR REPLACE INTO kv_settings (key, value) VALUES (?, ?)`, [SETTING_GEMINI_MODEL, nextModel]);
       await sqlite.run(`INSERT OR REPLACE INTO kv_settings (key, value) VALUES (?, ?)`, [
@@ -2129,7 +2131,6 @@ function ConfigPanel(props: {
       await sqlite.run(`INSERT OR REPLACE INTO kv_settings (key, value) VALUES (?, ?)`, [SETTING_APPLY_EMAIL, nextApplyEmail]);
 
       setSavedLanguage(nextLanguage);
-      setSavedSerpApiKey(nextSerp);
       setSavedGeminiApiKey(nextGem);
       setSavedGeminiModel(nextModel);
       setSavedWebhook(nextWebhook);
@@ -2322,13 +2323,6 @@ function ConfigPanel(props: {
             </label>
           </div>
           <p className={st}>Saved: {savedLanguage === "fr" ? "Français" : "English"}</p>
-        </div>
-        <div>
-          <label className={lb} htmlFor="cf-serp">
-            SerpApi API key
-          </label>
-          <input id="cf-serp" className={fi} value={serpApiKey} onChange={(ev) => setSerpApiKey(ev.target.value)} autoComplete="off" />
-          <p className={st}>Saved: {configFieldStatus(savedSerpApiKey, { secret: true })}</p>
         </div>
         <div>
           <label className={lb} htmlFor="cf-gem">

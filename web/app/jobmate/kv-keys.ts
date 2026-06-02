@@ -1,4 +1,3 @@
-export const SETTING_SERPAPI_API_KEY = "serpapi_api_key";
 export const SETTING_GEMINI_API_KEY = "gemini_api_key";
 export const SETTING_GEMINI_MODEL = "gemini_model";
 export const SETTING_NOTIFICATION_WEBHOOK_URL = "notification_webhook_url";

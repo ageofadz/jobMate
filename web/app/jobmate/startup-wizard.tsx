@@ -6,8 +6,7 @@ import {
   SETTING_GEMINI_MODEL,
   SETTING_INITIAL_SETUP_COMPLETE,
   SETTING_LANGUAGE,
-  SETTING_NOTIFICATION_WEBHOOK_URL,
-  SETTING_SERPAPI_API_KEY
+  SETTING_NOTIFICATION_WEBHOOK_URL
 } from "./kv-keys";
 
 type WizardShellProps = {
@@ -213,7 +212,6 @@ export function BrowserSetupWizard(props: { sqlite: JobmateSqlite; userId: strin
   const [profileRow, setProfileRow] = useState<Record<string, unknown> | null>(null);
 
   const [language, setLanguage] = useState<"en" | "fr">("en");
-  const [serpApiKey, setSerpApiKey] = useState("");
   const [geminiApiKey, setGeminiApiKey] = useState("");
   const [geminiModel, setGeminiModel] = useState("gemini-3.1-flash-lite");
   const [webhook, setWebhook] = useState("");
@@ -262,10 +260,6 @@ export function BrowserSetupWizard(props: { sqlite: JobmateSqlite; userId: strin
           setSkills(String(row.skills ?? ""));
         }
 
-        const serp = await sqlite.all<{ value: string }>(
-          "SELECT value FROM kv_settings WHERE key = ?",
-          [SETTING_SERPAPI_API_KEY]
-        );
         const gem = await sqlite.all<{ value: string }>(
           "SELECT value FROM kv_settings WHERE key = ?",
           [SETTING_GEMINI_API_KEY]
@@ -283,7 +277,6 @@ export function BrowserSetupWizard(props: { sqlite: JobmateSqlite; userId: strin
           return;
         }
 
-        setSerpApiKey(serp[0]?.value ?? "");
         setGeminiApiKey(gem[0]?.value ?? "");
         setGeminiModel(mod[0]?.value?.trim() ? String(mod[0].value) : "gemini-3.1-flash-lite");
         setWebhook(hook[0]?.value ?? "");
@@ -327,10 +320,6 @@ export function BrowserSetupWizard(props: { sqlite: JobmateSqlite; userId: strin
       await sqlite.run(`INSERT OR REPLACE INTO kv_settings (key, value) VALUES (?, ?)`, [
         SETTING_LANGUAGE,
         language
-      ]);
-      await sqlite.run(`INSERT OR REPLACE INTO kv_settings (key, value) VALUES (?, ?)`, [
-        SETTING_SERPAPI_API_KEY,
-        serpApiKey.trim()
       ]);
       await sqlite.run(`INSERT OR REPLACE INTO kv_settings (key, value) VALUES (?, ?)`, [
         SETTING_GEMINI_API_KEY,
@@ -405,18 +394,6 @@ export function BrowserSetupWizard(props: { sqlite: JobmateSqlite; userId: strin
 
         <fieldset className="space-y-4 rounded-xl border border-gray-200 p-4 dark:border-gray-800">
           <legend className="px-1 text-sm font-medium text-gray-900 dark:text-gray-100">API keys</legend>
-          <div>
-            <label className={labelClass()} htmlFor="jm-serp">
-              SerpApi API key (serpapi.com)
-            </label>
-            <input
-              id="jm-serp"
-              className={inputClass()}
-              value={serpApiKey}
-              onChange={(ev) => setSerpApiKey(ev.target.value)}
-              autoComplete="off"
-            />
-          </div>
           <div>
             <label className={labelClass()} htmlFor="jm-gem">
               Gemini API key (optional)

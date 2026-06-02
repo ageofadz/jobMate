@@ -1,5 +1,4 @@
-import type { OrganicSearchResult } from "@/lib/services/serp-shared";
-import { searchGoogleOrganic } from "@/lib/services/serp";
+import type { OrganicSearchResult } from "@/lib/services/organic-search";
 import { listingHtmlHeaders } from "@/lib/listing-html-headers";
 
 const ATS_HOSTS = [
@@ -122,34 +121,34 @@ export async function enrichJobLeadMetadata(params: {
   parsedLinkedinLinks?: string[];
   fetchOrganic?: (query: string, limit: number) => Promise<OrganicSearchResult[]>;
 }) {
-  const fetchOrganic = params.fetchOrganic ?? searchGoogleOrganic;
+  const fetchOrganic = params.fetchOrganic;
   const emails = extractEmails(params.listingText);
   const linkedinLinks = [...(params.parsedLinkedinLinks ?? []), ...extractLinkedinLinks(params.listingText)];
   let companyHomepage = params.parsedHomepage && isLikelyCompanyHomepage(params.parsedHomepage) ? params.parsedHomepage : null;
 
-  const searches = params.company.trim()
-    ? await Promise.allSettled([
-        fetchOrganic(`${params.company} official website`, 5),
-        fetchOrganic(`${params.company} recruiter hiring manager LinkedIn`, 10),
-        fetchOrganic(`${params.company} careers contact email`, 10)
-      ])
-    : [];
+  if (fetchOrganic && params.company.trim()) {
+    const searches = await Promise.allSettled([
+      fetchOrganic(`${params.company} official website`, 5),
+      fetchOrganic(`${params.company} recruiter hiring manager LinkedIn`, 10),
+      fetchOrganic(`${params.company} careers contact email`, 10)
+    ]);
 
-  for (const settled of searches) {
-    if (settled.status !== "fulfilled") {
-      continue;
-    }
-
-    for (const result of settled.value) {
-      if (!companyHomepage && isLikelyCompanyHomepage(result.link)) {
-        companyHomepage = result.link;
+    for (const settled of searches) {
+      if (settled.status !== "fulfilled") {
+        continue;
       }
 
-      if (/linkedin\.com\/(?:in|company)\//i.test(result.link)) {
-        linkedinLinks.push(result.link);
-      }
+      for (const result of settled.value) {
+        if (!companyHomepage && isLikelyCompanyHomepage(result.link)) {
+          companyHomepage = result.link;
+        }
 
-      emails.push(...extractEmails(`${result.title} ${result.snippet}`));
+        if (/linkedin\.com\/(?:in|company)\//i.test(result.link)) {
+          linkedinLinks.push(result.link);
+        }
+
+        emails.push(...extractEmails(`${result.title} ${result.snippet}`));
+      }
     }
   }
 

@@ -106,7 +106,8 @@ window.addEventListener("message", (ev) => {
     "FETCH_PAGE_HTML",
     "JOBMATE_OPEN_BACKGROUND_TAB",
     "JOBMATE_OPEN_APPLY_TAB",
-    "JOBMATE_EMAIL_SYNC"
+    "JOBMATE_EMAIL_SYNC",
+    "JOBMATE_INTERRUPT_APPLY_TAB"
   ];
 
   if (!ALLOWED_TYPES.includes(d.type)) {
@@ -129,6 +130,8 @@ window.addEventListener("message", (ev) => {
     bgMsg = { type: "JOBMATE_OPEN_APPLY_TAB", requestId: d.requestId, url: d.url, payloadUrl: d.payloadUrl, sessionId: d.sessionId, jobData: d.jobData };
   } else if (d.type === "JOBMATE_EMAIL_SYNC") {
     bgMsg = { type: "JOBMATE_EMAIL_SYNC", requestId: d.requestId, url: d.url };
+  } else if (d.type === "JOBMATE_INTERRUPT_APPLY_TAB") {
+    bgMsg = { type: "JOBMATE_INTERRUPT_APPLY_TAB", requestId: d.requestId, tabId: d.tabId };
   }
 
   chrome.runtime.sendMessage(bgMsg, (resp) => {

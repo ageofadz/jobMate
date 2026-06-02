@@ -12,8 +12,7 @@ import {
   SETTING_GEMINI_MODEL,
   SETTING_INITIAL_SETUP_COMPLETE,
   SETTING_LANGUAGE,
-  SETTING_NOTIFICATION_WEBHOOK_URL,
-  SETTING_SERPAPI_API_KEY
+  SETTING_NOTIFICATION_WEBHOOK_URL
 } from "../lib/settings-store";
 
 export async function runInitialSetupWizardIfNeeded(userId: string) {
@@ -33,11 +32,6 @@ export async function runInitialSetupWizardIfNeeded(userId: string) {
   });
 
   setSetting(SETTING_LANGUAGE, language);
-
-  const serp = await input({
-    message: translate("serpApiKeyLong"),
-    default: ""
-  });
 
   const gemini = await input({
     message: translate("geminiApiKeyLong"),
@@ -104,7 +98,6 @@ export async function runInitialSetupWizardIfNeeded(userId: string) {
     default: true
   });
 
-  setSetting(SETTING_SERPAPI_API_KEY, serp.trim());
   setSetting(SETTING_GEMINI_API_KEY, gemini.trim());
   setSetting(SETTING_GEMINI_MODEL, model.trim() || "gemini-3.1-flash-lite");
   setSetting(SETTING_NOTIFICATION_WEBHOOK_URL, webhook.trim());

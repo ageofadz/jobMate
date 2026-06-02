@@ -1,15 +1,15 @@
 import { normalizeApplyUrl } from "@/lib/apply-url";
 import type { SearchCandidate } from "@/lib/types";
 
-type SerpApiOrganicResult = {
+type OrganicResultRow = {
   title?: string;
   link?: string;
   displayed_link?: string;
   snippet?: string;
 };
 
-type SerpApiResponse = {
-  organic_results?: SerpApiOrganicResult[];
+type OrganicResultsBatch = {
+  organic_results?: OrganicResultRow[];
 };
 
 export type OrganicSearchResult = {
@@ -72,7 +72,7 @@ function inferCompanyFromHost(host: string) {
     .join(" ");
 }
 
-function organicSerpRowToCandidate(result: SerpApiOrganicResult): SearchCandidate | null {
+function organicRowToCandidate(result: OrganicResultRow): SearchCandidate | null {
   if (!result.link) {
     return null;
   }
@@ -101,7 +101,7 @@ function organicSerpRowToCandidate(result: SerpApiOrganicResult): SearchCandidat
 }
 
 export function mergeOrganicResultsToCandidates(
-  organicRows: SerpApiOrganicResult[],
+  organicRows: OrganicResultRow[],
   limit: number
 ): SearchCandidate[] {
   const deduped = new Map<string, SearchCandidate>();
@@ -111,7 +111,7 @@ export function mergeOrganicResultsToCandidates(
       continue;
     }
 
-    const cand = organicSerpRowToCandidate(result);
+    const cand = organicRowToCandidate(result);
 
     if (!cand || deduped.has(cand.sourceUrl)) {
       continue;
@@ -124,7 +124,7 @@ export function mergeOrganicResultsToCandidates(
 }
 
 export function mergeOrganicResultsRoundRobin(
-  perQueryRows: SerpApiOrganicResult[][],
+  perQueryRows: OrganicResultRow[][],
   limit: number
 ): SearchCandidate[] {
   const deduped = new Map<string, SearchCandidate>();
@@ -144,7 +144,7 @@ export function mergeOrganicResultsRoundRobin(
         continue;
       }
 
-      const cand = organicSerpRowToCandidate(result);
+      const cand = organicRowToCandidate(result);
 
       if (!cand || deduped.has(cand.sourceUrl)) {
         continue;
@@ -220,7 +220,7 @@ export async function searchGoogleListingsWithOrganicFetcher(
           displayed_link: result.displayedLink,
           snippet: result.snippet
         }))
-      } satisfies SerpApiResponse;
+      } satisfies OrganicResultsBatch;
     })
   );
 

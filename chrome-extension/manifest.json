@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "JobMate",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Agentic browser assistant. Give it tasks, it figures out the rest.",
   "action": {
     "default_popup": "popup.html",

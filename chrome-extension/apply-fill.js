@@ -62,6 +62,7 @@
   const norm = (value) => clean(value).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
   const demographicPattern = /\b(pronouns?|race|ethnicity|gender|disabilit(?:y|ies)|veteran|eeo|equal opportunity|hispanic|latino|self identify|self-identify)\b/i;
   const optOutPattern = /\b(do not wish|don't wish|do not want|don't want|prefer not|decline|choose not|not disclose|no answer|wish not)\b/i;
+  let forcedInterrupt = null;
 
   let elementRegistry = new Map();
   let elemSeq = 0;
@@ -1411,7 +1412,7 @@
   }
 
   function showActionPanel(options) {
-    const { id, statusLines, btnLabel, btnColor, onConfirm, alertTitle } = options;
+    const { id, statusLines, btnLabel, btnColor, onConfirm, alertTitle, hasInput, inputPlaceholder } = options;
 
     panel(statusLines);
 
@@ -1433,12 +1434,21 @@
       const btn = document.createElement("button");
       btn.textContent = btnLabel;
       btn.style.cssText = `background:${btnColor || "#059669"};color:white;border:none;padding:10px 16px;border-radius:6px;font:14px -apple-system,sans-serif;cursor:pointer;width:100%`;
+      let instructionInput = null;
+      if (hasInput) {
+        instructionInput = document.createElement("textarea");
+        instructionInput.placeholder = inputPlaceholder || "Optional instruction for JobMate";
+        instructionInput.style.cssText =
+          "box-sizing:border-box;width:100%;min-height:90px;padding:10px 12px;border-radius:6px;border:1px solid #4b5563;background:#111827;color:#f9fafb;font:13px -apple-system,sans-serif;resize:vertical";
+        wrap.appendChild(instructionInput);
+      }
       btn.onclick = async () => {
         btn.disabled = true;
         btn.textContent = "Working…";
-        await onConfirm?.();
+        const userInstruction = instructionInput ? instructionInput.value.trim() : "";
+        await onConfirm?.(userInstruction);
         wrap.remove();
-        resolve();
+        resolve(userInstruction);
       };
 
       wrap.appendChild(btn);
@@ -1612,11 +1622,21 @@
       btnLabel: "Continue",
       btnColor: "#b45309",
       alertTitle: "Needs attention",
-      onConfirm: null
+      hasInput: true,
+      inputPlaceholder: "Optional instruction for JobMate before continuing",
+      onConfirm: async (userInstruction) => {
+        if (userInstruction) {
+          await extensionMessage({
+            type: "JOBMATE_APPLY_HUMAN_INSTRUCTION",
+            instruction: userInstruction,
+            applyUrl: location.href
+          }).catch(() => {});
+        }
+      }
     });
     resetUrlPingPongTrack();
     await extensionMessage({ type: "JOBMATE_RESET_URL_OSCILLATION" }).catch(() => {});
-    return result;
+    return typeof result === "string" ? result : "";
   }
 
   function panel(lines) {
@@ -1763,11 +1783,12 @@
     const handledForms = new Set();
     const failuresByState = new Map();
     const blockedElementIds = new Set();
+    const failedTaskAttempts = new Map();
     const MAX_STEPS = 20;
     const STUCK_THRESHOLD = 3;
     let lastReason = "";
 
-    async function checkStuck(stateBefore, instruction) {
+    async function checkStuck(stateBefore, instruction, taskKey) {
       await sleep(400);
       const { fieldItems: fieldsAfter } = collectPageElements(null);
       const stateAfter = pageStateKey(fieldsAfter.length);
@@ -1777,19 +1798,40 @@
       }
       const attempts = (failuresByState.get(stateBefore) || 0) + 1;
       failuresByState.set(stateBefore, attempts);
-      if (attempts >= STUCK_THRESHOLD) {
+      const stuckTaskKey = taskKey || `state:${stateBefore}`;
+      const totalFailures = (failedTaskAttempts.get(stuckTaskKey) || 0) + 1;
+      failedTaskAttempts.set(stuckTaskKey, totalFailures);
+      if (totalFailures >= STUCK_THRESHOLD || attempts >= STUCK_THRESHOLD) {
         failuresByState.set(stateBefore, 0);
-        await requestHumanHelp(
+        failedTaskAttempts.set(stuckTaskKey, 0);
+        const userInstruction = await requestHumanHelp(
           lastReason || "The agent is stuck on this step.",
           instruction || "Please complete this step manually, then click Continue."
         );
         history.push({ step: history.length, tool: "human_unblocked", reasoning: "user resolved stuck state" });
+        if (userInstruction) {
+          history.push({ step: history.length, tool: "human_instruction", reasoning: userInstruction });
+        }
       }
     }
 
     for (let step = 0; step < MAX_STEPS; step++) {
       if (!(await verifyRunner(payloadUrl))) {
         return;
+      }
+
+      if (forcedInterrupt) {
+        const pending = forcedInterrupt;
+        forcedInterrupt = null;
+        const userInstruction = await requestHumanHelp(
+          pending.reason || "Interrupted by user.",
+          pending.instruction || "Complete what is needed to unblock, then click Continue."
+        );
+        history.push({ step: history.length, tool: "human_interrupt", reasoning: pending.reason || "Interrupted by user." });
+        if (userInstruction) {
+          history.push({ step: history.length, tool: "human_instruction", reasoning: userInstruction });
+        }
+        continue;
       }
 
       await waitForPageLoad();
@@ -1848,7 +1890,11 @@
             handledForms.add(formKey);
             failuresByState.delete(stateBefore);
           } else {
-            await checkStuck(stateBefore, "Please submit the login/registration form manually, then click Continue.");
+            await checkStuck(
+              stateBefore,
+              "Please submit the login/registration form manually, then click Continue.",
+              `auth_submit|${stateBefore}`
+            );
           }
           continue;
         }
@@ -1871,11 +1917,14 @@
       lastReason = action.reasoning || "";
 
       if (action.tool === "blocked") {
-        await requestHumanHelp(
+        const userInstruction = await requestHumanHelp(
           action.reasoning || "The agent is blocked.",
           "Please complete this step manually, then click Continue."
         );
         history.push({ ...histEntry, tool: "human_unblocked" });
+        if (userInstruction) {
+          history.push({ step: history.length, tool: "human_instruction", reasoning: userInstruction });
+        }
         failuresByState.delete(stateBefore);
         continue;
       }
@@ -1883,24 +1932,31 @@
       if (action.tool === "wait") {
         statusPanel(step, MAX_STEPS, action, "Waiting for page…");
         history.push(histEntry);
-        await checkStuck(stateBefore, "Please complete this step manually, then click Continue.");
+        await checkStuck(stateBefore, "Please complete this step manually, then click Continue.", `wait|${stateBefore}`);
         continue;
       }
 
       if (action.tool === "navigate" && action.url) {
         if (isForbiddenNavigationUrl(action.url, location.href)) {
           blockedElementIds.add(action.elementId || `nav:${action.url}`);
-          await requestHumanHelp(
+          const userInstruction = await requestHumanHelp(
             "Blocked forbidden navigation.",
             "Return to the job listing and click Apply there, then click Continue."
           );
+          if (userInstruction) {
+            history.push({ step: history.length, tool: "human_instruction", reasoning: userInstruction });
+          }
           continue;
         }
         statusPanel(step, MAX_STEPS, action);
         await rememberPlaybookStep(pageUrlBefore, fieldCountBefore, action, elements).catch(() => {});
         if (navigateNow(action.url)) return;
         history.push({ ...histEntry, reasoning: "already on target page" });
-        await checkStuck(stateBefore, "Please navigate or complete this step manually, then click Continue.");
+        await checkStuck(
+          stateBefore,
+          "Please navigate or complete this step manually, then click Continue.",
+          `navigate|${action.url || stateBefore}`
+        );
         continue;
       }
 
@@ -1926,24 +1982,39 @@
         } else {
           blockedElementIds.add(action.elementId);
         }
-        await checkStuck(stateBefore, "Please click the required button manually, then click Continue.");
+        await checkStuck(
+          stateBefore,
+          "Please click the required button manually, then click Continue.",
+          `click|${action.elementId || stateBefore}`
+        );
         continue;
       }
 
       history.push(histEntry);
-      await checkStuck(stateBefore, "Please complete this step manually, then click Continue.");
+      await checkStuck(stateBefore, "Please complete this step manually, then click Continue.", `${action.tool}|${stateBefore}`);
     }
 
     panel(["JobMate: step limit reached", "Could not reach application form."]);
   }
 
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-    if (msg?.type !== "JOBMATE_START_APPLY") {
-      return;
+    if (msg?.type === "JOBMATE_FORCE_INTERRUPT") {
+      forcedInterrupt = {
+        reason: typeof msg.reason === "string" ? msg.reason : "Interrupted by user.",
+        instruction:
+          typeof msg.instruction === "string"
+            ? msg.instruction
+            : "Complete what is needed to unblock, then click Continue."
+      };
+      sendResponse({ ok: true });
+      return true;
     }
-    run().catch((err) => panel(`JobMate error: ${err?.message ?? String(err)}`));
-    sendResponse({ ok: true });
-    return true;
+    if (msg?.type === "JOBMATE_START_APPLY") {
+      run().catch((err) => panel(`JobMate error: ${err?.message ?? String(err)}`));
+      sendResponse({ ok: true });
+      return true;
+    }
+    return;
   });
 
   run().catch((err) => panel(`JobMate error: ${err?.message ?? String(err)}`));

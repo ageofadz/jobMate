@@ -23,15 +23,13 @@ import {
   getNotificationWebhookUrl,
   getChromeExtensionOutputDir,
   getLanguageSetting,
-  getSerpApiKey,
   setSetting,
   SETTING_APPLY_EMAIL,
   SETTING_CHROME_EXTENSION_OUTPUT_DIR,
   SETTING_GEMINI_API_KEY,
   SETTING_GEMINI_MODEL,
   SETTING_LANGUAGE,
-  SETTING_NOTIFICATION_WEBHOOK_URL,
-  SETTING_SERPAPI_API_KEY
+  SETTING_NOTIFICATION_WEBHOOK_URL
 } from "../lib/settings-store";
 import { promptProfileFields } from "./local-user";
 import { insertPreferenceFromPrompts, updatePreferenceFromPrompts } from "./preference-prompts";
@@ -196,10 +194,6 @@ export async function runApiSettings() {
           value: "applyEmail"
         },
         {
-          name: `SerpApi key (${mask(getSerpApiKey())})`,
-          value: "serp"
-        },
-        {
           name: `Gemini key (${mask(getGeminiApiKey())})`,
           value: "gemini"
         },
@@ -225,12 +219,6 @@ export async function runApiSettings() {
         default: getApplyEmail() ?? ""
       });
       setSetting(SETTING_APPLY_EMAIL, v.trim());
-    } else if (action === "serp") {
-      const v = await input({
-        message: "SerpApi API key",
-        default: getSerpApiKey() ?? ""
-      });
-      setSetting(SETTING_SERPAPI_API_KEY, v.trim());
     } else if (action === "gemini") {
       const v = await input({
         message: "Gemini API key",
