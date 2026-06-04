@@ -15,7 +15,7 @@ type GeminiResponse = {
 
 const GEMINI_PRIMARY_MODEL = "gemini-3.1-flash-lite";
 const GEMINI_FALLBACK_MODEL = "gemini-2-flash";
-const GEMINI_STABLE_FALLBACK_MODEL = "gemini-2.5-flash";
+const GEMINI_STABLE_FALLBACK_MODEL = "gemini-3.1-flash-lite";
 
 function parseJsonObject(text: string): unknown {
   const trimmed = text.trim();

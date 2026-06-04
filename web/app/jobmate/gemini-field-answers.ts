@@ -25,7 +25,7 @@ type GeminiUserPart =
   | { inline_data: { mime_type: string; data: string } };
 
 const GEMINI_FALLBACK_MODEL = "gemini-2-flash";
-const GEMINI_STABLE_FALLBACK_MODEL = "gemini-2.5-flash";
+const GEMINI_STABLE_FALLBACK_MODEL = "gemini-3.1-flash-lite";
 
 const COMPENSATION_INSTRUCTIONS = [
   "For desired salary, compensation expectation, salary range, pay, rate, or minimum compensation fields, analyze the listing's posted compensation and the candidate's preferred compensation range from the candidate context.",

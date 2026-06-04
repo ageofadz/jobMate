@@ -27,6 +27,19 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return;
   }
 
+  if (msg?.type === "JOBMATE_APPLY_CLOSED") {
+    window.postMessage(
+      {
+        source: "jobmate-extension",
+        type: "JOBMATE_APPLY_CLOSED",
+        tabId: typeof msg.tabId === "number" ? msg.tabId : null,
+        applyUrl: typeof msg.applyUrl === "string" ? msg.applyUrl : ""
+      },
+      "*"
+    );
+    return;
+  }
+
   if (msg?.type === "JOBMATE_FETCH_APP_CONFIG") {
     const requestId = crypto.randomUUID();
 

@@ -1,10 +1,15 @@
 <!doctype html>
 <html>
+
 <head>
   <meta charset="utf-8">
   <title>JobMate</title>
   <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
 
     :root {
       --bg: #0f172a;
@@ -20,7 +25,8 @@
       --yellow: #fbbf24;
     }
 
-    html, body {
+    html,
+    body {
       height: 100%;
       background: var(--bg);
       color: var(--text);
@@ -43,15 +49,32 @@
       flex-shrink: 0;
     }
 
-    .logo { font-size: 14px; font-weight: 700; color: var(--accent); letter-spacing: -.01em; }
+    .logo {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--accent);
+      letter-spacing: -.01em;
+    }
 
-    .header-actions { display: flex; gap: 6px; }
+    .header-actions {
+      display: flex;
+      gap: 6px;
+    }
 
     .icon-btn {
-      background: none; border: 1px solid var(--border); border-radius: 5px;
-      color: var(--muted); padding: 4px 8px; cursor: pointer; font-size: 11px;
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      color: var(--muted);
+      padding: 4px 8px;
+      cursor: pointer;
+      font-size: 11px;
     }
-    .icon-btn:hover { color: var(--text); border-color: var(--accent); }
+
+    .icon-btn:hover {
+      color: var(--text);
+      border-color: var(--accent);
+    }
 
     /* ── Callout ─────────────────────────── */
     #callout {
@@ -63,33 +86,81 @@
       padding: 10px 12px;
       flex-shrink: 0;
     }
-    #callout.visible { display: block; }
-    #callout.warn { background: #2d1a0e; border-color: #5a3010; }
-    #callout.info { background: #0e1e2d; border-color: #1a4a6b; }
+
+    #callout.visible {
+      display: block;
+    }
+
+    #callout.warn {
+      background: #2d1a0e;
+      border-color: #5a3010;
+    }
+
+    #callout.info {
+      background: #0e1e2d;
+      border-color: #1a4a6b;
+    }
 
     .callout-label {
-      font-size: 10px; font-weight: 700; text-transform: uppercase;
-      letter-spacing: .07em; color: var(--green); margin-bottom: 4px;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .07em;
+      color: var(--green);
+      margin-bottom: 4px;
     }
-    #callout.warn .callout-label { color: var(--orange); }
-    #callout.info .callout-label { color: var(--accent); }
 
-    .callout-msg { font-size: 12px; color: var(--text); margin-bottom: 8px; line-height: 1.45; }
+    #callout.warn .callout-label {
+      color: var(--orange);
+    }
 
-    .callout-instruction { font-size: 11px; color: var(--muted); margin-bottom: 8px; }
+    #callout.info .callout-label {
+      color: var(--accent);
+    }
+
+    .callout-msg {
+      font-size: 12px;
+      color: var(--text);
+      margin-bottom: 8px;
+      line-height: 1.45;
+    }
+
+    .callout-instruction {
+      font-size: 11px;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
 
     .callout-input {
-      width: 100%; padding: 6px 9px; background: var(--surface); border: 1px solid var(--border);
-      border-radius: 5px; color: var(--text); font: 12px -apple-system, sans-serif; outline: none;
+      width: 100%;
+      padding: 6px 9px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      color: var(--text);
+      font: 12px -apple-system, sans-serif;
+      outline: none;
       margin-bottom: 6px;
     }
-    .callout-input:focus { border-color: var(--accent); }
+
+    .callout-input:focus {
+      border-color: var(--accent);
+    }
 
     .callout-btn {
-      padding: 6px 14px; background: var(--green); color: #0f172a; border: none;
-      border-radius: 5px; font: 12px -apple-system, sans-serif; font-weight: 700; cursor: pointer;
+      padding: 6px 14px;
+      background: var(--green);
+      color: #0f172a;
+      border: none;
+      border-radius: 5px;
+      font: 12px -apple-system, sans-serif;
+      font-weight: 700;
+      cursor: pointer;
     }
-    .callout-btn:hover { filter: brightness(1.1); }
+
+    .callout-btn:hover {
+      filter: brightness(1.1);
+    }
 
     /* ── Task list ─────────────────────────── */
     #tasks {
@@ -108,27 +179,81 @@
       padding: 10px 12px;
     }
 
-    .task-header { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 4px; }
+    .task-header {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      margin-bottom: 4px;
+    }
 
     .task-status-dot {
-      width: 7px; height: 7px; border-radius: 50%; margin-top: 5px; flex-shrink: 0;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      margin-top: 5px;
+      flex-shrink: 0;
     }
-    .task-status-dot.running { background: var(--accent); box-shadow: 0 0 4px var(--accent); animation: pulse 1.2s infinite; }
-    .task-status-dot.done { background: var(--green); }
-    .task-status-dot.error { background: var(--red); }
-    .task-status-dot.waiting { background: var(--orange); }
-    .task-status-dot.pending { background: var(--muted); }
 
-    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
+    .task-status-dot.running {
+      background: var(--accent);
+      box-shadow: 0 0 4px var(--accent);
+      animation: pulse 1.2s infinite;
+    }
 
-    .task-title { font-size: 12px; font-weight: 600; color: var(--text); flex: 1; }
+    .task-status-dot.done {
+      background: var(--green);
+    }
+
+    .task-status-dot.error {
+      background: var(--red);
+    }
+
+    .task-status-dot.waiting {
+      background: var(--orange);
+    }
+
+    .task-status-dot.pending {
+      background: var(--muted);
+    }
+
+    @keyframes pulse {
+
+      0%,
+      100% {
+        opacity: 1;
+      }
+
+      50% {
+        opacity: .4;
+      }
+    }
+
+    .task-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text);
+      flex: 1;
+    }
+
     .task-dismiss {
-      background: none; border: none; color: var(--muted); cursor: pointer;
-      font-size: 14px; line-height: 1; padding: 0 2px;
+      background: none;
+      border: none;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 14px;
+      line-height: 1;
+      padding: 0 2px;
     }
-    .task-dismiss:hover { color: var(--red); }
 
-    .task-status-text { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+    .task-dismiss:hover {
+      color: var(--red);
+    }
+
+    .task-status-text {
+      font-size: 11px;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
 
     .task-steps {
       list-style: none;
@@ -137,29 +262,68 @@
       flex-direction: column;
       gap: 2px;
     }
+
     .task-step {
       font-size: 11px;
       color: var(--muted);
       padding-left: 14px;
       position: relative;
     }
-    .task-step::before { content: "·"; position: absolute; left: 4px; }
-    .task-step.active { color: var(--accent); }
-    .task-step.done { color: var(--green); }
-    .task-step.done::before { content: "✓"; left: 3px; }
-    .task-step.error { color: var(--red); }
+
+    .task-step::before {
+      content: "·";
+      position: absolute;
+      left: 4px;
+    }
+
+    .task-step.active {
+      color: var(--accent);
+    }
+
+    .task-step.done {
+      color: var(--green);
+    }
+
+    .task-step.done::before {
+      content: "✓";
+      left: 3px;
+    }
+
+    .task-step.error {
+      color: var(--red);
+    }
 
     .task-group-badge {
-      display: inline-block; font-size: 10px; background: var(--surface2); border: 1px solid var(--border);
-      border-radius: 4px; padding: 1px 5px; color: var(--muted); margin-top: 5px;
+      display: inline-block;
+      font-size: 10px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 1px 5px;
+      color: var(--muted);
+      margin-top: 5px;
     }
 
     .empty-state {
-      flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
-      text-align: center; color: var(--muted); gap: 8px; padding: 32px;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      color: var(--muted);
+      gap: 8px;
+      padding: 32px;
     }
-    .empty-state .big { font-size: 28px; }
-    .empty-state p { font-size: 12px; line-height: 1.6; }
+
+    .empty-state .big {
+      font-size: 28px;
+    }
+
+    .empty-state p {
+      font-size: 12px;
+      line-height: 1.6;
+    }
 
     /* ── Input area ─────────────────────────── */
     #input-area {
@@ -169,33 +333,78 @@
     }
 
     .clarify-question {
-      font-size: 12px; color: var(--accent); margin-bottom: 6px;
-      background: var(--surface2); border-radius: 6px; padding: 8px 10px;
+      font-size: 12px;
+      color: var(--accent);
+      margin-bottom: 6px;
+      background: var(--surface2);
+      border-radius: 6px;
+      padding: 8px 10px;
       border-left: 3px solid var(--accent);
     }
-    .clarify-question.hidden { display: none; }
 
-    .input-row { display: flex; gap: 6px; align-items: flex-end; }
+    .clarify-question.hidden {
+      display: none;
+    }
+
+    .input-row {
+      display: flex;
+      gap: 6px;
+      align-items: flex-end;
+    }
 
     #task-input {
-      flex: 1; padding: 8px 10px; background: var(--surface); border: 1px solid var(--border);
-      border-radius: 7px; color: var(--text); font: 13px -apple-system, sans-serif;
-      outline: none; resize: none; line-height: 1.4; min-height: 38px; max-height: 120px;
+      flex: 1;
+      padding: 8px 10px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      color: var(--text);
+      font: 13px -apple-system, sans-serif;
+      outline: none;
+      resize: none;
+      line-height: 1.4;
+      min-height: 38px;
+      max-height: 120px;
       overflow-y: auto;
     }
-    #task-input:focus { border-color: var(--accent); }
-    #task-input::placeholder { color: var(--muted); }
+
+    #task-input:focus {
+      border-color: var(--accent);
+    }
+
+    #task-input::placeholder {
+      color: var(--muted);
+    }
 
     #send-btn {
-      background: var(--accent); border: none; border-radius: 7px; color: #0f172a;
-      font: 13px -apple-system, sans-serif; font-weight: 700; cursor: pointer;
-      padding: 8px 14px; height: 38px; white-space: nowrap; flex-shrink: 0;
+      background: var(--accent);
+      border: none;
+      border-radius: 7px;
+      color: #0f172a;
+      font: 13px -apple-system, sans-serif;
+      font-weight: 700;
+      cursor: pointer;
+      padding: 8px 14px;
+      height: 38px;
+      white-space: nowrap;
+      flex-shrink: 0;
     }
-    #send-btn:hover { filter: brightness(1.1); }
-    #send-btn:disabled { background: var(--surface2); color: var(--muted); cursor: default; }
+
+    #send-btn:hover {
+      filter: brightness(1.1);
+    }
+
+    #send-btn:disabled {
+      background: var(--surface2);
+      color: var(--muted);
+      cursor: default;
+    }
 
     .input-hint {
-      font-size: 10px; color: var(--muted); margin-top: 5px; line-height: 1.4;
+      font-size: 10px;
+      color: var(--muted);
+      margin-top: 5px;
+      line-height: 1.4;
     }
 
     /* ── Settings panel ─────────────────────────── */
@@ -207,58 +416,180 @@
       padding: 12px;
       gap: 14px;
     }
-    #settings-panel.visible { display: flex; }
 
-    .settings-section { display: flex; flex-direction: column; gap: 6px; }
+    #settings-panel.visible {
+      display: flex;
+    }
+
+    .settings-section {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
     .settings-section-title {
-      font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em;
-      color: var(--muted); border-bottom: 1px solid var(--border); padding-bottom: 5px;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 5px;
     }
 
-    label { font-size: 11px; color: var(--muted); display: block; margin-bottom: 2px; }
-    input[type=text], input[type=password], input[type=email], textarea, select {
-      width: 100%; padding: 6px 9px; background: var(--surface); border: 1px solid var(--border);
-      border-radius: 5px; color: var(--text); font: 12px -apple-system, sans-serif; outline: none;
+    label {
+      font-size: 11px;
+      color: var(--muted);
+      display: block;
+      margin-bottom: 2px;
     }
-    input:focus, textarea:focus { border-color: var(--accent); }
-    textarea { resize: vertical; min-height: 70px; }
 
-    .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    input[type=text],
+    input[type=password],
+    input[type=email],
+    textarea,
+    select {
+      width: 100%;
+      padding: 6px 9px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      color: var(--text);
+      font: 12px -apple-system, sans-serif;
+      outline: none;
+    }
 
-    .key-row { display: flex; gap: 6px; }
-    .key-row input { flex: 1; }
+    input:focus,
+    textarea:focus {
+      border-color: var(--accent);
+    }
+
+    textarea {
+      resize: vertical;
+      min-height: 70px;
+    }
+
+    .row2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .key-row {
+      display: flex;
+      gap: 6px;
+    }
+
+    .key-row input {
+      flex: 1;
+    }
+
     .key-toggle {
-      background: none; border: 1px solid var(--border); border-radius: 5px; color: var(--muted);
-      padding: 0 8px; cursor: pointer; font-size: 11px; white-space: nowrap;
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      color: var(--muted);
+      padding: 0 8px;
+      cursor: pointer;
+      font-size: 11px;
+      white-space: nowrap;
     }
-    .key-toggle:hover { color: var(--text); }
 
-    .save-row { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+    .key-toggle:hover {
+      color: var(--text);
+    }
+
+    .save-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-top: 4px;
+    }
+
     .save-btn {
-      padding: 8px 16px; background: var(--accent); color: #0f172a; border: none; border-radius: 6px;
-      font: 12px -apple-system, sans-serif; font-weight: 700; cursor: pointer;
+      padding: 8px 16px;
+      background: var(--accent);
+      color: #0f172a;
+      border: none;
+      border-radius: 6px;
+      font: 12px -apple-system, sans-serif;
+      font-weight: 700;
+      cursor: pointer;
     }
-    .save-btn:hover { filter: brightness(1.1); }
-    #save-status { font-size: 11px; }
-    #save-status.ok { color: var(--green); }
-    #save-status.error { color: var(--red); }
 
-    input[type=file] { font-size: 11px; color: var(--muted); cursor: pointer; }
-    input[type=file]::file-selector-button {
-      background: var(--surface); border: 1px solid var(--border); color: var(--text);
-      padding: 3px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; margin-right: 7px;
+    .save-btn:hover {
+      filter: brightness(1.1);
     }
-    .resume-name { font-size: 11px; color: var(--accent); margin-top: 3px; word-break: break-all; }
-    .resume-clear { font-size: 11px; color: var(--muted); cursor: pointer; margin-left: 6px; }
-    .resume-clear:hover { color: var(--red); }
-    .field-hint { font-size: 10px; color: var(--muted); margin-top: 2px; }
+
+    #save-status {
+      font-size: 11px;
+    }
+
+    #save-status.ok {
+      color: var(--green);
+    }
+
+    #save-status.error {
+      color: var(--red);
+    }
+
+    input[type=file] {
+      font-size: 11px;
+      color: var(--muted);
+      cursor: pointer;
+    }
+
+    input[type=file]::file-selector-button {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 3px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 11px;
+      margin-right: 7px;
+    }
+
+    .resume-name {
+      font-size: 11px;
+      color: var(--accent);
+      margin-top: 3px;
+      word-break: break-all;
+    }
+
+    .resume-clear {
+      font-size: 11px;
+      color: var(--muted);
+      cursor: pointer;
+      margin-left: 6px;
+    }
+
+    .resume-clear:hover {
+      color: var(--red);
+    }
+
+    .field-hint {
+      font-size: 10px;
+      color: var(--muted);
+      margin-top: 2px;
+    }
 
     /* ── Scrollbar ─────────────────────────── */
-    ::-webkit-scrollbar { width: 4px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+    ::-webkit-scrollbar {
+      width: 4px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 2px;
+    }
   </style>
 </head>
+
 <body>
 
   <header>
@@ -272,7 +603,8 @@
     <div class="callout-label" id="callout-label">Action needed</div>
     <div class="callout-msg" id="callout-msg"></div>
     <div class="callout-instruction" id="callout-instruction"></div>
-    <input class="callout-input" id="callout-input" type="text" placeholder="Type a reply or correction…" style="display:none">
+    <input class="callout-input" id="callout-input" type="text" placeholder="Type a reply or correction…"
+      style="display:none">
     <button class="callout-btn" id="callout-btn">Continue</button>
   </div>
 
@@ -326,17 +658,21 @@
 
     <div class="settings-section">
       <div class="settings-section-title">Profile context</div>
-      <textarea id="s-context" rows="6" placeholder="Name: Jane Smith&#10;Role: Frontend Engineer&#10;Location: Paris, France&#10;LinkedIn: linkedin.com/in/janesmith&#10;Skills: React, TypeScript, Node.js&#10;…"></textarea>
-      <p class="field-hint">This is sent to the LLM to fill form fields and plan searches. Include name, location, skills, work history, URLs, etc.</p>
+      <textarea id="s-context" rows="6"
+        placeholder="Name: Jane Smith&#10;Role: Frontend Engineer&#10;Location: Paris, France&#10;LinkedIn: linkedin.com/in/janesmith&#10;Skills: React, TypeScript, Node.js&#10;…"></textarea>
+      <p class="field-hint">This is sent to the LLM to fill form fields and plan searches. Include name, location,
+        skills, work history, URLs, etc.</p>
     </div>
 
     <div class="settings-section">
-      <div class="settings-section-title">Writing sample <span style="font-weight:400;font-size:10px">(cover letter style)</span></div>
+      <div class="settings-section-title">Writing sample <span style="font-weight:400;font-size:10px">(cover letter
+          style)</span></div>
       <textarea id="s-sample" rows="4" placeholder="Paste a paragraph you wrote…"></textarea>
     </div>
 
     <div class="settings-section">
-      <div class="settings-section-title">Cover letter template <span style="font-weight:400;font-size:10px">(optional)</span></div>
+      <div class="settings-section-title">Cover letter template <span
+          style="font-weight:400;font-size:10px">(optional)</span></div>
       <textarea id="s-cltemplate" rows="3"></textarea>
     </div>
 
@@ -354,4 +690,5 @@
 
   <script src="sidepanel.js"></script>
 </body>
+
 </html>

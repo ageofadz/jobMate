@@ -7,6 +7,21 @@ function sleep(ms) {
 const applySessionByTabId = new Map();
 const applyAutomationTabByPayload = new Map();
 const internalSessionJobData = new Map();
+const coverLetterReviewBySession = new Map();
+const coverLetterReviewByTab = new Map();
+
+function openCoverLetterReviewSession(draft, openerTabId) {
+  const sessionId = crypto.randomUUID();
+  return new Promise((resolve) => {
+    coverLetterReviewBySession.set(sessionId, {
+      draft: String(draft || ""),
+      openerTabId: openerTabId ?? null,
+      resolve
+    });
+    const url = chrome.runtime.getURL(`cover-letter-editor.html?id=${encodeURIComponent(sessionId)}`);
+    chrome.tabs.create({ url, active: true });
+  });
+}
 
 // ── Sidebar port ────────────────────────────────────────────────────────────
 
@@ -392,7 +407,88 @@ function extractUrl(text) {
   }
 }
 
-const GEMINI_FALLBACK_MODELS = ["gemini-3.1-flash-lite", "gemini-2-flash", "gemini-2.5-flash"];
+const GEMINI_FALLBACK_MODELS = ["gemini-3.1-flash-lite", "gemini-2-flash", "gemini-3.1-flash-lite"];
+const AGENT_GEMINI_MODELS = ["gemini-3.1-flash-lite", "gemini-2.5-pro", "gemini-2-flash"];
+const FORM_CHUNK_SIZE = 20;
+
+function resolveAgentModel(config) {
+  const user = config.geminiModel?.trim();
+  if (user && !/lite/i.test(user)) return user;
+  return AGENT_GEMINI_MODELS[0];
+}
+
+async function captureTabScreenshot(tabId) {
+  const tab = await chrome.tabs.get(tabId);
+  if (!tab.windowId) throw new Error("Tab has no window.");
+  if (!tab.active) {
+    await chrome.tabs.update(tabId, { active: true });
+    await sleep(200);
+  }
+  const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "jpeg", quality: 72 });
+  const comma = dataUrl.indexOf(",");
+  return comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
+}
+
+const A11Y_INTERACTIVE_ROLES = new Set([
+  "button", "link", "textbox", "searchbox", "combobox", "listbox",
+  "radio", "checkbox", "switch", "menuitem", "tab", "spinbutton", "slider",
+  "menuitemcheckbox", "menuitemradio", "option"
+]);
+
+async function getA11ySnapshot(tabId) {
+  try {
+    await chrome.debugger.attach({ tabId }, "1.3");
+  } catch {
+    return null;
+  }
+  try {
+    const { nodes } = await chrome.debugger.sendCommand({ tabId }, "Accessibility.getFullAXTree");
+    const lines = [];
+    let n = 0;
+    for (const node of nodes) {
+      const role = node.role?.value;
+      if (!role || !A11Y_INTERACTIVE_ROLES.has(role)) continue;
+      const name = (node.name?.value || "").trim().slice(0, 80);
+      if (!name) continue;
+      const props = node.properties || [];
+      const disabled = props.find((p) => p.name === "disabled")?.value?.value === true;
+      if (disabled) continue;
+      const required = props.find((p) => p.name === "required")?.value?.value === true;
+      const checked = props.find((p) => p.name === "checked")?.value?.value;
+      const value = props.find((p) => p.name === "value")?.value?.value;
+      let line = `[${role}] "${name}"`;
+      if (required) line += " required";
+      if (checked !== undefined && checked !== "mixed") line += ` checked:${checked}`;
+      if (value && (role === "textbox" || role === "searchbox") && String(value).trim()) {
+        line += ` value:"${String(value).slice(0, 40)}"`;
+      }
+      lines.push(line);
+      if (++n >= 80) break;
+    }
+    return lines.length ? lines.join("\n") : null;
+  } catch {
+    return null;
+  } finally {
+    chrome.debugger.detach({ tabId }).catch(() => {});
+  }
+}
+
+function chunkFields(fields, size = FORM_CHUNK_SIZE) {
+  const chunks = [];
+  for (let i = 0; i < fields.length; i += size) {
+    chunks.push(fields.slice(i, i + size));
+  }
+  return chunks;
+}
+
+function formChunkKind(fields) {
+  if (fields.every((f) => f.type === "file")) return "file";
+  if (fields.some((f) => f.type === "textarea" || f.type === "contenteditable")) return "longform";
+  const labels = fields.map((f) => (f.label || "").toLowerCase()).join(" ");
+  if (/full name|first name|last name|email|phone|linkedin|github|portfolio|website/.test(labels)) return "identity";
+  if (fields.some((f) => f.type === "select" || f.type === "radio" || f.type === "checkbox")) return "choice";
+  return "screening";
+}
 
 const COMPENSATION_PROMPT_LINES = [
   "For desired salary, compensation expectation, salary range, pay, rate, or minimum compensation fields, analyze the listing's posted compensation and the candidate's preferred compensation range from the candidate context.",
@@ -524,7 +620,8 @@ async function callGeminiExt(parts, apiKey, primaryModel, json = false) {
           body: JSON.stringify({
             contents: [{ role: "user", parts }],
             generationConfig: json ? { responseMimeType: "application/json" } : undefined
-          })
+          }),
+          signal: AbortSignal.timeout(90000)
         }
       );
     } catch (err) { lastError = String(err.message || err); continue; }
@@ -583,86 +680,111 @@ async function generateCoverLetterExt(config, jobData, pageLanguage) {
   } catch { return ""; }
 }
 
-async function generateFormAnswersExt(tabId, fields, retryNote, pageLanguage) {
-  if (!fields.length) return { answers: [], resumeFieldIds: [], coverLetterText: "", coverUpload: null };
-  const config = await getExtensionConfig();
-  const apiKey = config.geminiApiKey?.trim();
-  if (!apiKey) throw new Error("No Gemini API key configured. Open the extension popup → Settings and add your key.");
-  const model = config.geminiModel?.trim() || GEMINI_FALLBACK_MODELS[0];
-  const session = getApplySession(tabId);
-  const payloadUrl = session?.payloadUrl ?? "";
-  const jobData = payloadUrl ? (internalSessionJobData.get(payloadUrl) ?? {}) : {};
-  const hasPdf = Boolean(config.resumePdfBase64);
-  const contextBlock = config.contextBlock || "";
-  const writingSample = config.writingSample || "";
-  const listingText = jobData.listingText || "";
-  let coverLetterText = jobData.coverLetterText || "";
+function buildFormAnswerPrompt(fields, ctx) {
+  const { hasPdf, coverLetterText, contextBlock, writingSample, listingText, retryNote, chunkIndex, chunkTotal, kind } = ctx;
+  const requiredFieldSummary = fields
+    .filter((f) => f.required)
+    .map((f) => `fieldId="${f.fieldId}" label="${f.label}" type=${f.type}${f.options?.length ? ` options=${JSON.stringify(f.options.slice(0, 8))}` : ""}`)
+    .join("\n");
 
-  const hasCoverLetterField = fields.some((f) => f.type === "textarea" || f.type === "contenteditable");
+  const kindLines = {
+    identity: [
+      "This chunk is identity/contact info. Use exact candidate name, email, phone, and profile URLs from context.",
+      `Candidate name: ${ctx.candidateName || ""}`,
+      `Candidate email: ${ctx.candidateEmail || ""}`
+    ],
+    choice: [
+      "This chunk is mostly dropdowns, radios, or checkboxes.",
+      "Every answer MUST be the exact text of one listed option. Never invent options or use free text."
+    ],
+    longform: [
+      "This chunk includes long text fields.",
+      "Use the cover letter text for cover letter, motivation, or why-us questions.",
+      "For other textarea fields, answer concisely unless the label asks for a long statement."
+    ],
+    file: [
+      "This chunk is file uploads only.",
+      "Resume/CV fields: return exactly \"__resume__\". Cover letter file fields: return exactly \"__cover_letter__\". Other file fields: empty string."
+    ],
+    screening: [
+      "This chunk is screening questions. Answer from candidate context and job listing.",
+      "Be concise and truthful. Match each answer to the exact field label."
+    ]
+  };
 
-  if (hasCoverLetterField && !coverLetterText) {
-    try {
-      coverLetterText = await generateCoverLetterExt(config, jobData, pageLanguage);
-      if (payloadUrl) {
-        internalSessionJobData.set(payloadUrl, { ...(internalSessionJobData.get(payloadUrl) ?? {}), coverLetterText });
-      }
-    } catch { }
-  }
-
-  const prompt = [
+  return [
     "You are filling a job application form.",
-    "You will receive the entire visible form as JSON. Each field has a fieldId. Return answers keyed by the same fieldId.",
+    "Each field has a unique fieldId, label, type, and options where applicable. Match answers using the fieldId.",
+    chunkTotal > 1 ? `This is chunk ${chunkIndex + 1} of ${chunkTotal}. Answer ONLY the fields in Fields JSON.` : "",
+    "Each field has a fieldId. Return answers keyed by the same fieldId.",
     "Read every field label literally. Do not move an answer from one field to another.",
-    "For every answer, first identify what that exact field label is asking. The answer must fit that exact field label and its options.",
     "You must return exactly one answers item for every field in Fields JSON.",
-    "Every field must receive a non-empty answer. Required and optional fields alike must be filled.",
-    "Never skip a field because it is optional. Location, visa sponsorship, work authorization, and how-you-heard questions must always be answered.",
+    "Every field in Fields JSON must have a non-empty answer. No exceptions — optional fields included.",
+    "Any field with required=true MUST have a non-empty answer.",
+    "Never skip any field. Location, visa sponsorship, work authorization, and how-you-heard must always be answered.",
     hasPdf
-      ? "Every empty answer is invalid. Use the candidate context and the attached resume PDF to answer every field."
-      : "Every empty answer is invalid. Use the candidate context and resume to answer every field.",
-    hasPdf
-      ? "Identity fields are mandatory: Full name must use the candidate name. Email and any confirm-email field must use the candidate email. Phone must use the candidate phone if present in context or resume PDF."
-      : "Identity fields are mandatory: Full name must use the candidate name. Email and any confirm-email field must use the candidate email. Phone must use the candidate phone if present in context or resume.",
-    "If a field asks about visa sponsorship, work authorization, or legal right to work, answer truthfully from candidate context and choose the closest matching option. Never leave these empty.",
-    "If a field asks for current location, city, state, country, or address, answer from candidate context. Under 80 characters.",
+      ? "Use the candidate context and attached resume PDF to answer every field."
+      : "Use the candidate context to answer every field.",
+    ...(kindLines[kind] || kindLines.screening),
+    "DROPDOWN AND SELECT RULE: return the exact text of one listed option.",
+    "RADIO RULE: return the exact text of one listed option.",
+    "If a field asks about visa sponsorship or work authorization, answer from candidate context with the closest matching option.",
+    "If a field asks for location, city, state, country, or address, answer from candidate context. Under 80 characters.",
     "If a field asks how the candidate heard about the job, answer exactly 'Google'.",
-    "If a field asks for a cover letter, motivation letter, letter of interest, or supporting statement, use the provided cover letter tool.",
-    "If a field asks for a message to the recruitment or hiring team, what motivates the candidate, why they want to join, or why this role is their next challenge, use the provided cover letter tool.",
-    "If a field is asking why the candidate would be a strong addition to the team or culture, answer as a culture-fit question focused on soft skills, not technical experience, unless the field clearly asks for a long motivation statement.",
-    "For culture-fit questions, use the candidate writing sample as the style reference when one is provided.",
+    `Candidate email: ${ctx.candidateEmail || ""}`,
+    "For phone country code, dialing code, indicatif, or Ländervorwahl dropdowns: match the candidate's phone number and stated location in candidate context (+1 → United States / États-Unis / USA, +44 → United Kingdom, +33 → France). Do not guess from unrelated words in context. Do not select Armenia unless the profile phone or location explicitly indicates Armenia (+374).",
     "Never return a filename, file path, or PDF name as an answer.",
-    "For file-type fields: if the field is asking for a resume, CV, curriculum vitae, or equivalent, return exactly \"__resume__\". If asking for a cover letter or motivation letter, return exactly \"__cover_letter__\". For any other file field, return an empty string.",
-    "Never use the cover letter text for location, source/how-heard, authorization, short answer, URL, or phone fields unless the field clearly asks for a long written statement.",
-    "Determine the field's intent semantically from its label, key, type, and options, not by keyword matching alone.",
-    "If a field asks for a URL, answer only a URL. For LinkedIn, GitHub, personal website, Twitter/X: answer the candidate's URL for that network if present in context, otherwise use the closest truthful value from context.",
-    "Only for optional demographic or equal-opportunity self-identification fields (race, ethnicity, gender, pronouns, disability, veteran status), choose the opt-out option when one exists.",
-    "Only for required demographic self-identification choice fields, choose the option equivalent to 'I do not wish to answer', 'Decline to self-identify', 'Prefer not to say', or 'I don't want to answer'.",
-    "For checkbox fields that are not demographic, answer with the option label that checks the box, usually 'Yes' or the affirmative consent option.",
-    "For multi-select checkbox groups, return every applicable option label separated by commas.",
-    "For select and dropdown fields, answer using the exact option label from that field's options list.",
-    "For radio, checkbox, and select fields, answer using option labels from that field's options.",
-    "For required radio, checkbox, and select fields, you must choose the best available option.",
+    "For file-type fields: read the label. CV/resume/curriculum upload → \"__resume__\" only. Cover letter / motivation letter upload → \"__cover_letter__\" only. Never use __cover_letter__ on a CV field. Never use __resume__ on a cover letter field. Other file fields: empty string.",
+    "If a field asks for a URL, answer only a URL from candidate context.",
+    "For optional demographic EEO fields, choose the opt-out option when one exists.",
+    "For required demographic EEO fields, choose decline/prefer-not-to-say when available.",
+    "For non-demographic checkboxes, use the affirmative option label, usually 'Yes'.",
+    "For required privacy, terms, data protection, or consent radio/checkbox groups, return the exact accept/agree option label from that field's options list (must match one option character-for-character).",
     ...COMPENSATION_PROMPT_LINES,
-    "Use normal capitalization. Be concise, concrete, and truthful.",
-    "Return valid JSON only with shape {\"answers\":[{\"fieldId\":\"\",\"answer\":\"\",\"reasoning\":\"\"}]}.",
-    retryNote ? `Critical retry note:\n${retryNote}` : "",
+    "Return valid JSON only: {\"answers\":[{\"fieldId\":\"\",\"answer\":\"\",\"reasoning\":\"\"}]}",
+    requiredFieldSummary ? `REQUIRED FIELDS:\n${requiredFieldSummary}` : "",
+    retryNote ? `CRITICAL RETRY:\n${retryNote}` : "",
     `Fields JSON:\n${JSON.stringify(fields)}`,
     contextBlock ? `Candidate context:\n${contextBlock}` : "",
-    !hasPdf ? "" : "",
     coverLetterText ? `Cover letter text:\n${coverLetterText}` : "",
     writingSample ? `Candidate writing sample:\n${writingSample.slice(0, 6000)}` : "",
     listingText ? `Job listing text:\n${listingText.slice(0, 8000)}` : ""
   ].filter(Boolean).join("\n\n");
+}
 
+async function requestFormAnswersFromGemini(fields, ctx) {
+  const { config, apiKey, model } = ctx;
+  const hasPdf = Boolean(config.resumePdfBase64);
+  const prompt = buildFormAnswerPrompt(fields, ctx);
   const parts = [{ text: prompt }];
   if (hasPdf && config.resumePdfBase64) {
     parts.push({ inline_data: { mime_type: config.resumePdfMimeType || "application/pdf", data: config.resumePdfBase64 } });
   }
 
-  const raw = await callGeminiExt(parts, apiKey, model, true);
-  const parsed = parseJsonObjectExt(raw);
+  let raw;
+  try {
+    raw = await callGeminiExt(parts, apiKey, model, true);
+  } catch (callErr) {
+    throw new Error(`Gemini call failed: ${callErr.message}`);
+  }
+
+  let parsed;
+  try {
+    parsed = parseJsonObjectExt(raw);
+  } catch {
+    const rawSnippet = raw.slice(0, 600);
+    const selfCorrectPrompt = [
+      "Return valid JSON only: {\"answers\":[{\"fieldId\":\"\",\"answer\":\"\",\"reasoning\":\"\"}]}",
+      `Broken output:\n${rawSnippet}`,
+      `Fields:\n${JSON.stringify(fields)}`
+    ].join("\n\n");
+    const correctedRaw = await callGeminiExt([{ text: selfCorrectPrompt }], apiKey, model, true);
+    parsed = parseJsonObjectExt(correctedRaw);
+  }
+
   const validFieldIds = new Set(fields.map((f) => f.fieldId));
   const resumeFieldIds = [];
+  const coverLetterFieldIds = [];
   const answers = [];
 
   for (const item of parsed.answers ?? []) {
@@ -672,8 +794,11 @@ async function generateFormAnswersExt(tabId, fields, retryNote, pageLanguage) {
     if (answer === "__resume__") {
       resumeFieldIds.push(fieldId);
       answers.push({ fieldId, answer: "", reasoning: item.reasoning ?? "" });
+    } else if (answer === "__cover_letter__") {
+      coverLetterFieldIds.push(fieldId);
+      answers.push({ fieldId, answer: "", reasoning: item.reasoning ?? "" });
     } else {
-      answers.push({ fieldId, answer: answer === "__cover_letter__" ? "" : answer, reasoning: item.reasoning ?? "Answered from whole-form field dump." });
+      answers.push({ fieldId, answer, reasoning: item.reasoning ?? "" });
     }
   }
 
@@ -682,8 +807,145 @@ async function generateFormAnswersExt(tabId, fields, retryNote, pageLanguage) {
     answers.push({ fieldId: field.fieldId, answer: "", reasoning: "" });
   }
 
-  const covUpload = null;
-  return { ok: true, answers, resumeFieldIds, coverLetterText, coverUpload: covUpload };
+  return { answers, resumeFieldIds, coverLetterFieldIds };
+}
+
+async function classifyFileUploadFieldsExt(apiKey, model, fileFields, contextBlock) {
+  if (!fileFields.length) return { resumeFieldIds: [], coverLetterFieldIds: [] };
+  const valid = new Set(fileFields.map((f) => f.fieldId));
+  const prompt = [
+    "Classify file upload fields only. Read each label in any language.",
+    "Fields for CV, resume, curriculum vitae, or equivalent → resumeFieldIds.",
+    "Fields for cover letter, motivation letter, lettre de motivation, or equivalent → coverLetterFieldIds.",
+    "Any other file field belongs in neither list.",
+    "The same fieldId must never appear in both arrays.",
+    "A CV upload field must never be in coverLetterFieldIds.",
+    "A cover letter upload field must never be in resumeFieldIds.",
+    "Return JSON only: {\"resumeFieldIds\":[],\"coverLetterFieldIds\":[]}",
+    `File fields:\n${JSON.stringify(fileFields.map((f) => ({ fieldId: f.fieldId, label: f.label })))}`,
+    contextBlock ? `Candidate context:\n${contextBlock.slice(0, 2000)}` : ""
+  ].filter(Boolean).join("\n\n");
+  const raw = await callGeminiExt([{ text: prompt }], apiKey, model, true);
+  const parsed = parseJsonObjectExt(raw);
+  const resumeFieldIds = (parsed.resumeFieldIds ?? []).map(String).filter((id) => valid.has(id));
+  const coverLetterFieldIds = (parsed.coverLetterFieldIds ?? []).map(String).filter((id) => valid.has(id));
+  const coverSet = new Set(coverLetterFieldIds);
+  for (const id of resumeFieldIds) {
+    if (coverSet.has(id)) {
+      throw new Error("A file field was classified as both CV and cover letter.");
+    }
+  }
+  return { resumeFieldIds, coverLetterFieldIds };
+}
+
+async function generateFormAnswersExt(tabId, fields, retryNote, pageLanguage) {
+  if (!fields.length) return { ok: true, answers: [], resumeFieldIds: [], coverLetterText: "", coverUpload: null };
+  const config = await getExtensionConfig();
+  const apiKey = config.geminiApiKey?.trim();
+  if (!apiKey) throw new Error("No Gemini API key configured. Open the extension popup → Settings and add your key.");
+  const model = resolveAgentModel(config);
+  const session = getApplySession(tabId);
+  const payloadUrl = session?.payloadUrl ?? "";
+  const jobData = payloadUrl ? (internalSessionJobData.get(payloadUrl) ?? {}) : {};
+  const contextBlock = config.contextBlock || "";
+  const writingSample = config.writingSample || "";
+  const listingText = jobData.listingText || "";
+  let coverLetterText = jobData.coverLetterText || "";
+
+  const sharedCtx = {
+    config,
+    apiKey,
+    model,
+    hasPdf: Boolean(config.resumePdfBase64),
+    coverLetterText,
+    contextBlock,
+    writingSample,
+    listingText,
+    retryNote: retryNote || "",
+    candidateName: config.candidateName?.trim() || "",
+    candidateEmail: config.candidateEmail?.trim() || ""
+  };
+
+  const chunks = retryNote ? chunkFields(fields) : [fields];
+  const results = await Promise.all(
+    chunks.map((chunk, i) =>
+      requestFormAnswersFromGemini(chunk, {
+        ...sharedCtx,
+        kind: formChunkKind(chunk),
+        chunkIndex: i,
+        chunkTotal: chunks.length
+      })
+    )
+  );
+  const mergedAnswers = results.flatMap((r) => r.answers);
+  let resumeFieldIds = [...new Set(results.flatMap((r) => r.resumeFieldIds))];
+  let coverLetterFieldIds = [...new Set(results.flatMap((r) => r.coverLetterFieldIds))];
+
+  const fileFields = fields.filter((f) => f.type === "file");
+  if (fileFields.length) {
+    const classified = await classifyFileUploadFieldsExt(apiKey, model, fileFields, contextBlock);
+    resumeFieldIds = classified.resumeFieldIds;
+    coverLetterFieldIds = classified.coverLetterFieldIds;
+    const resumeSet = new Set(resumeFieldIds);
+    const coverSet = new Set(coverLetterFieldIds);
+    for (const entry of mergedAnswers) {
+      if (!fileFields.some((f) => f.fieldId === entry.fieldId)) continue;
+      if (resumeSet.has(entry.fieldId)) entry.answer = "";
+      else if (coverSet.has(entry.fieldId)) entry.answer = "";
+      else entry.answer = "";
+    }
+  }
+
+  return { ok: true, answers: mergedAnswers, resumeFieldIds, coverLetterFieldIds, coverLetterText, coverUpload: null };
+}
+
+async function validatePageAdvanceExt(tabId, msg) {
+  const config = await getExtensionConfig();
+  const apiKey = config.geminiApiKey?.trim();
+  if (!apiKey) throw new Error("No Gemini API key configured.");
+  const model = resolveAgentModel(config);
+
+  const goal = String(msg.goal || "Advance the job application form to the next step.");
+  const pageUrl = String(msg.pageUrl || "");
+  const validationErrors = Array.isArray(msg.validationErrors) ? msg.validationErrors : [];
+  const fields = Array.isArray(msg.fields) ? msg.fields : [];
+
+  const fieldSummary = fields
+    .slice(0, 24)
+    .map((f) => `fieldId="${f.fieldId}" label="${f.label}" type=${f.type} required=${Boolean(f.required)} value=${JSON.stringify(f.value || "")}${f.options?.length ? ` options=${JSON.stringify(f.options.slice(0, 6))}` : ""}`)
+    .join("\n");
+
+  const prompt = [
+    "You validate whether a job application form step succeeded after the user clicked Continue or Next.",
+    `Goal: ${goal}`,
+    `Page URL: ${pageUrl}`,
+    validationErrors.length
+      ? `Validation errors visible on the page:\n${validationErrors.join("\n")}`
+      : "No explicit validation errors were detected, but the page did not advance.",
+    fieldSummary ? `Current field states:\n${fieldSummary}` : "",
+    "Determine whether the form successfully advanced to a new step, or is still blocked on the same step.",
+    "If blocked, identify which fields need corrected answers.",
+    "Return JSON only: {\"advanced\":true|false,\"corrections\":[{\"fieldId\":\"\",\"answer\":\"\"}],\"reasoning\":\"\"}",
+    "corrections must use exact option labels for select/radio/checkbox fields.",
+    "If advanced is true, corrections must be an empty array."
+  ].filter(Boolean).join("\n\n");
+
+  const raw = await callGeminiExt([{ text: prompt }], apiKey, model, true);
+  const parsed = parseJsonObjectExt(raw);
+  const validFieldIds = new Set(fields.map((f) => f.fieldId));
+  const corrections = (parsed.corrections ?? [])
+    .map((item) => ({
+      fieldId: String(item.fieldId ?? ""),
+      answer: String(item.answer ?? "")
+    }))
+    .filter((item) => item.fieldId && validFieldIds.has(item.fieldId) && item.answer.trim());
+
+  return {
+    ok: true,
+    advanced: Boolean(parsed.advanced),
+    corrections,
+    reasoning: String(parsed.reasoning ?? "")
+  };
 }
 
 const applyPageUrlOscillationByTab = new Map();
@@ -730,10 +992,10 @@ async function nextBrowserActionExt(tabId, pageData) {
   const config = await getExtensionConfig();
   const apiKey = config.geminiApiKey?.trim();
   if (!apiKey) throw new Error("No Gemini API key configured.");
-  const model = config.geminiModel?.trim() || GEMINI_FALLBACK_MODELS[0];
+  const model = resolveAgentModel(config);
   const jobData = getSessionJobData(tabId);
 
-  const { pageUrl, pageText, stepIndex, history, hiddenApplyUrl, elements, blockedElementIds } = pageData;
+  const { pageUrl, pageText, stepIndex, history, hiddenApplyUrl, elements, blockedElementIds, overlayMap } = pageData;
   const blockedIds = new Set(Array.isArray(blockedElementIds) ? blockedElementIds.map(String) : []);
 
   if (recordApplyPageUrlOscillation(tabId, pageUrl)) {
@@ -907,36 +1169,43 @@ async function nextBrowserActionExt(tabId, pageData) {
 
   const hasApplicationForm = fields.some((f) => f.fieldType === "file" || f.fieldType === "textarea" || f.fieldType === "contenteditable") || fields.length >= 8;
 
+  const a11ySnapshot = await getA11ySnapshot(tabId).catch(() => null);
+
+  const actionsText = actions.map((e) => {
+    let line = `elementId="${e.elementId}" [${e.tag}] "${String(e.text || "").slice(0, 80)}"`;
+    if (e.href) line += ` href="${e.href.slice(0, 120)}"`;
+    if (e.context) line += ` ctx="${String(e.context).slice(0, 80)}"`;
+    return line;
+  }).join("\n");
+
   const prompt = [
     "You are controlling a browser to complete a job application.",
-    "Examine the page and choose ONE action from CLICKABLE ELEMENTS that advances the application.",
-    "Return exactly one JSON object, no other text:",
-    '{"tool":"click|submit|navigate|wait|blocked","elementId":null,"url":null,"reasoning":""}',
-    "Rules:",
-    "- click: advance to the next step (Next, Continue, Accept terms, etc.)",
-    "- submit: use ONLY when clicking this button would FINALLY submit the completed application to the employer. Do NOT use submit for Next/Continue wizard steps.",
-    "- navigate: only to one of the Allowed URLs listed below",
-    "- wait: only if the page is still loading",
-    "- blocked: only if you genuinely cannot proceed",
-    "- Do NOT click elements whose URL resolves to a profile, account, settings, dashboard, or inbox page",
+    "Choose ONE action that advances toward submitting the application.",
+    'Return exactly: {"tool":"click|submit|navigate|wait|blocked","elementId":null,"url":null,"reasoning":""}',
+    "- click: advance the form (Next, Continue, Accept terms, close modal)",
+    "- submit: ONLY when this click would FINALLY submit the completed application to the employer, not for wizard Next/Continue steps",
+    "- navigate: ONLY to one of the Allowed URLs",
+    "- wait: page is still loading",
+    "- blocked: genuinely cannot proceed",
+    "Do NOT click profile, account, settings, dashboard, or inbox links.",
     pageHost === "workatastartup.com"
-      ? "- On workatastartup.com: NEVER use navigate. NEVER go to /application/* (that is an account page, not a job form). Only click the Apply button on the job listing."
+      ? "workatastartup: NEVER navigate. Only click Apply on the job listing page, never /application/* paths."
       : "",
-    targetTitle ? `Target job: "${targetTitle}" at ${targetCompany}` : "Target: apply on this page",
-    `Target listing URL: ${targetApplyUrl}`,
+    targetTitle ? `Job: "${targetTitle}" at ${targetCompany}` : "Target: apply on this page",
+    `Target URL: ${targetApplyUrl}`,
     hiddenApplyUrl ? `Hidden apply URL: ${hiddenApplyUrl}` : "",
-    `Current page: ${pageUrl} | step: ${stepIndex}`,
-    blockedIds.size ? `Already tried (do not repeat): ${JSON.stringify([...blockedIds])}` : "",
-    compactHistory.length ? `History: ${JSON.stringify(compactHistory)}` : "",
-    allowedUrls.size ? `Allowed navigate URLs: ${JSON.stringify([...allowedUrls])}` : "No navigate URLs available — use click only",
+    `Current: ${pageUrl} (step ${stepIndex})`,
+    blockedIds.size ? `Skip these (already tried): ${[...blockedIds].join(", ")}` : "",
+    compactHistory.length ? `Recent actions: ${JSON.stringify(compactHistory)}` : "",
+    allowedUrls.size ? `Allowed navigate URLs: ${JSON.stringify([...allowedUrls])}` : "No navigate URLs — use click only",
     hasApplicationForm
-      ? `Application form is present (${fields.length} fields). The extension will fill it automatically. Only click Next/Continue/Submit if the form is not yet submitted.`
+      ? `Form with ${fields.length} fields is present. Extension fills it automatically — only click Next/Continue/Submit.`
       : fields.length
-        ? `${fields.length} form fields visible — this may be a wizard step. Click the button that advances to the next step or submits.`
-        : "No form fields yet. Find and click the Apply or equivalent button in any language.",
-    `PAGE TEXT:\n${String(pageText || "").slice(0, 2000)}`,
-    `CLICKABLE ELEMENTS:\n${compactActions}`
-  ].filter(Boolean).join("\n");
+        ? `${fields.length} form fields visible. Click to advance or submit.`
+        : "No form yet. Find and click Apply or equivalent button in any language.",
+    a11ySnapshot ? `PAGE STRUCTURE (accessibility tree):\n${a11ySnapshot}` : `PAGE TEXT:\n${String(pageText || "").slice(0, 1500)}`,
+    actionsText ? `CLICKABLE ELEMENTS (use elementId from this list):\n${actionsText}` : ""
+  ].filter(Boolean).join("\n\n");
 
   const raw = await callGeminiExt([{ text: prompt }], apiKey, model, true);
   const parsed = parseJsonObjectExt(raw);
@@ -1040,19 +1309,37 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return false;
 });
 
-chrome.tabs.onRemoved.addListener((tabId) => {
+chrome.tabs.onRemoved.addListener(async (tabId) => {
   const session = getApplySession(tabId);
   const notifyTabId = session?.openerTabId ?? null;
+  const payloadUrl = session?.payloadUrl ?? "";
+  const sessionJob = payloadUrl ? internalSessionJobData.get(payloadUrl) : null;
+  const applyUrl = sessionJob?.applyUrl ?? "";
   applySessionByTabId.delete(tabId);
 
-  for (const [payloadUrl, automationTabId] of applyAutomationTabByPayload.entries()) {
+  for (const [payloadKey, automationTabId] of applyAutomationTabByPayload.entries()) {
     if (automationTabId === tabId) {
-      applyAutomationTabByPayload.delete(payloadUrl);
+      applyAutomationTabByPayload.delete(payloadKey);
     }
   }
 
+  const closedPayload = {
+    type: "JOBMATE_APPLY_CLOSED",
+    tabId,
+    applyUrl: typeof applyUrl === "string" ? applyUrl : ""
+  };
+
   if (notifyTabId) {
-    chrome.tabs.sendMessage(notifyTabId, { type: "JOBMATE_APPLY_CLOSED", tabId }).catch(() => { });
+    await chrome.tabs.sendMessage(notifyTabId, closedPayload).catch(() => { });
+    return;
+  }
+
+  const tabs = await chrome.tabs.query({});
+  for (const tab of tabs) {
+    const url = tab.url || "";
+    if (!tab.id) continue;
+    if (!isJobMateAppUrl(url)) continue;
+    await chrome.tabs.sendMessage(tab.id, closedPayload).catch(() => { });
   }
 });
 
@@ -1953,9 +2240,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           reason: "Interrupted by user.",
           instruction: "Complete the action needed to unblock this application, then click Continue."
         })
-        .catch(() => {});
-      await chrome.windows.update(applyTab.windowId, { focused: true }).catch(() => {});
-      await chrome.tabs.update(tabId, { active: true }).catch(() => {});
+        .catch(() => { });
+      await chrome.windows.update(applyTab.windowId, { focused: true }).catch(() => { });
+      await chrome.tabs.update(tabId, { active: true }).catch(() => { });
       sendResponse({ ok: true });
     })();
     return true;
@@ -2290,6 +2577,76 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg?.type === "JOBMATE_COVER_LETTER_EDITOR_READY") {
+    const sessionId = String(msg.sessionId || "");
+    const entry = coverLetterReviewBySession.get(sessionId);
+    sendResponse({ ok: Boolean(entry), draft: entry?.draft ?? "", error: entry ? "" : "Session expired." });
+    return true;
+  }
+
+  if (msg?.type === "JOBMATE_COVER_LETTER_EDITOR_DONE") {
+    const sessionId = String(msg.sessionId || "");
+    const entry = coverLetterReviewBySession.get(sessionId);
+    if (entry) {
+      coverLetterReviewBySession.delete(sessionId);
+      const action = msg.action === "save" ? "save" : "reject";
+      const text = action === "save" ? String(msg.text || "").trim() : "";
+      entry.resolve({ ok: true, action, text });
+      if (entry.openerTabId) {
+        chrome.tabs.update(entry.openerTabId, { active: true }).catch(() => { });
+      }
+    }
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  if (msg?.type === "JOBMATE_COVER_LETTER_REVIEW") {
+    (async () => {
+      const tabId = sender.tab?.id;
+      if (!tabId) {
+        sendResponse({ ok: false, error: "No tab." });
+        return;
+      }
+      try {
+        const existing = coverLetterReviewByTab.get(tabId);
+        if (existing?.decision) {
+          sendResponse(existing.decision);
+          return;
+        }
+        if (existing?.promise) {
+          sendResponse(await existing.promise);
+          return;
+        }
+
+        let draft = String(msg.draft || "").trim();
+        if (!draft) {
+          const cfg = await getExtensionConfig();
+          const jobData = getSessionJobData(tabId);
+          const pageLanguage = typeof msg.pageLanguage === "string" ? msg.pageLanguage : "";
+          draft = await generateCoverLetterExt(cfg, jobData, pageLanguage);
+          const session = getApplySession(tabId);
+          const payloadUrl = session?.payloadUrl ?? "";
+          if (draft && payloadUrl) {
+            internalSessionJobData.set(payloadUrl, {
+              ...(internalSessionJobData.get(payloadUrl) ?? {}),
+              coverLetterText: draft
+            });
+          }
+        }
+
+        const promise = openCoverLetterReviewSession(draft, tabId).then((decision) => {
+          coverLetterReviewByTab.set(tabId, { decision, promise: null });
+          return decision;
+        });
+        coverLetterReviewByTab.set(tabId, { promise, decision: null });
+        sendResponse(await promise);
+      } catch (err) {
+        sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      }
+    })();
+    return true;
+  }
+
   if (msg?.type === "JOBMATE_FILL_ANSWERS") {
     (async () => {
       const tabId = sender.tab?.id;
@@ -2305,6 +2662,112 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const existing = internalSessionJobData.get(payloadUrl) ?? {};
           internalSessionJobData.set(payloadUrl, { ...existing, coverLetterText: result.coverLetterText });
         }
+        sendResponse(result);
+      } catch (err) {
+        let reason = (err instanceof Error ? err.message : String(err)).trim();
+
+        if (!reason) {
+          const cfg = await getExtensionConfig().catch(() => ({}));
+          const apiKey = cfg.geminiApiKey?.trim();
+          const model = cfg.geminiModel?.trim() || GEMINI_FALLBACK_MODELS[0];
+          const fieldSummary = fields.slice(0, 10).map((f) => `"${f.label}" (${f.type})`).join(", ");
+          const demandPrompt = `You were asked to fill a job application form with these fields: ${fieldSummary}. You failed to do so and provided no error message. Explain specifically why you could not fill this form. Do not refuse to explain. Provide your actual reason.`;
+
+          for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+              const raw = await callGeminiExt([{ text: demandPrompt }], apiKey, model, false);
+              reason = raw.trim().slice(0, 400);
+              if (reason) break;
+            } catch { }
+          }
+
+          if (!reason) reason = "Gemini produced an empty error and refused to explain why after 3 attempts.";
+        }
+
+        sendResponse({ ok: false, error: reason });
+      }
+    })();
+    return true;
+  }
+
+  if (msg?.type === "JOBMATE_EXPLAIN_PLACEMENTS") {
+    (async () => {
+      try {
+        const config = await getExtensionConfig();
+        const apiKey = config.geminiApiKey?.trim();
+        if (!apiKey) { sendResponse({ ok: false, error: "No Gemini API key." }); return; }
+        const model = resolveAgentModel(config);
+        const placements = Array.isArray(msg.placements) ? msg.placements : [];
+        const validationErrors = Array.isArray(msg.validationErrors) ? msg.validationErrors : [];
+        const tabId = sender.tab?.id;
+
+        let screenshotBase64 = null;
+        if (tabId) {
+          try {
+            screenshotBase64 = await captureTabScreenshot(tabId);
+          } catch { }
+        }
+
+        const placementLines = placements.map((p) =>
+          `fieldId="${p.fieldId}" label="${p.label}" type=${p.type} required=${p.required}${p.options?.length ? ` options=${JSON.stringify(p.options.slice(0, 6))}` : ""}\nAnswer you gave: ${JSON.stringify(p.answer)}`
+        ).join("\n\n");
+
+        const errorBlock = validationErrors.length
+          ? `Validation errors shown by the page after you filled the form:\n${validationErrors.join("\n")}`
+          : "The form did not advance after you filled it.";
+
+        const prompt = [
+          "You just filled a job application form and the page failed — it did not advance to the next step.",
+          "A screenshot of the current page is attached.",
+          errorBlock,
+          "Below is every field you filled and the answer you placed in it.",
+          "For each field, you MUST:",
+          "  1. State exactly why you placed that specific answer in that field.",
+          "  2. If your answer was wrong, provide the corrected answer.",
+          "  3. If your answer was correct, explain why the validation error occurred for another reason.",
+          "Be specific. Name the exact instruction, assumption, or reasoning that caused each placement.",
+          "Return JSON array only: [{\"fieldId\":\"\",\"label\":\"\",\"type\":\"\",\"answer\":\"\",\"reasoning\":\"\",\"correctedAnswer\":\"\"}]",
+          `Candidate email: ${config.candidateEmail?.trim() || ""}`,
+          `Candidate name: ${config.candidateName?.trim() || ""}`,
+          `Context:\n${config.contextBlock || ""}`,
+          `Placements:\n${placementLines}`
+        ].filter(Boolean).join("\n\n");
+
+        const explainParts = [{ text: prompt }];
+        if (screenshotBase64) {
+          explainParts.push({ inline_data: { mime_type: "image/jpeg", data: screenshotBase64 } });
+        }
+
+        const raw = await callGeminiExt(explainParts, apiKey, model, true);
+        const parsed = parseJsonObjectExt(raw);
+        const items = Array.isArray(parsed) ? parsed : (parsed?.answers ?? []);
+
+        const explanations = placements.map((p) => {
+          const match = items.find((i) => String(i.fieldId ?? "") === p.fieldId);
+          return {
+            fieldId: p.fieldId,
+            label: p.label,
+            type: p.type,
+            answer: p.answer,
+            reasoning: match ? String(match.reasoning ?? match.reason ?? "") : "No explanation returned.",
+            correctedAnswer: match ? String(match.correctedAnswer ?? match.answer ?? p.answer) : p.answer
+          };
+        });
+
+        sendResponse({ ok: true, explanations });
+      } catch (err) {
+        sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      }
+    })();
+    return true;
+  }
+
+  if (msg?.type === "JOBMATE_VALIDATE_ADVANCE") {
+    (async () => {
+      const tabId = sender.tab?.id;
+      if (!tabId) { sendResponse({ ok: false, error: "No tab." }); return; }
+      try {
+        const result = await validatePageAdvanceExt(tabId, msg);
         sendResponse(result);
       } catch (err) {
         sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) });
@@ -2335,7 +2798,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (payloadUrl && payloadUrl.startsWith("ext://session/")) {
         internalSessionJobData.delete(payloadUrl);
       }
-      if (tabId) applySessionByTabId.delete(tabId);
+      if (tabId) {
+        applySessionByTabId.delete(tabId);
+        coverLetterReviewByTab.delete(tabId);
+      }
       if (payloadUrl) applyAutomationTabByPayload.delete(payloadUrl);
       sendResponse({ ok: true });
     })();

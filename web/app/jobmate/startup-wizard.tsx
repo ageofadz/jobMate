@@ -17,11 +17,11 @@ type WizardShellProps = {
 
 function WizardShell({ title, subtitle, children }: WizardShellProps) {
   return (
-    <div className="min-h-screen bg-white px-4 py-10 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
+    <div className="jm-page-bg min-h-screen px-4 py-10">
       <div className="mx-auto max-w-xl space-y-8">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
-          {subtitle ? <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">{subtitle}</p> : null}
+          <h1 className="jm-header-title text-2xl">{title}</h1>
+          {subtitle ? <p className="jm-muted mt-2 text-sm">{subtitle}</p> : null}
         </div>
         {children}
       </div>
@@ -30,11 +30,11 @@ function WizardShell({ title, subtitle, children }: WizardShellProps) {
 }
 
 function inputClass() {
-  return "mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100";
+  return "jm-input mt-1 w-full px-3 py-2 text-sm";
 }
 
 function labelClass() {
-  return "block text-sm font-medium text-gray-700 dark:text-gray-300";
+  return "block text-sm font-medium";
 }
 
 export function BrowserProfileWizard(props: { sqlite: JobmateSqlite; onCreatedUserId: (id: string) => void }) {
@@ -197,7 +197,7 @@ export function BrowserProfileWizard(props: { sqlite: JobmateSqlite; onCreatedUs
         <button
           type="submit"
           disabled={submitting}
-          className="w-full rounded-lg bg-gray-900 px-4 py-2.5 text-sm font-medium text-white disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900"
+          className="jm-btn-primary w-full px-4 py-2.5 text-sm disabled:opacity-50"
         >
           {submitting ? "Saving…" : "Save profile"}
         </button>
@@ -523,7 +523,7 @@ export function BrowserSetupWizard(props: { sqlite: JobmateSqlite; userId: strin
         <button
           type="submit"
           disabled={submitting}
-          className="w-full rounded-lg bg-gray-900 px-4 py-2.5 text-sm font-medium text-white disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900"
+          className="jm-btn-primary w-full px-4 py-2.5 text-sm disabled:opacity-50"
         >
           {submitting ? "Saving…" : "Finish setup"}
         </button>

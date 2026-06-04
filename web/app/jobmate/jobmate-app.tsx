@@ -27,14 +27,10 @@ import { enrichJobLeadMetadata } from "../../../lib/services/job-enrichment";
 import { loadExtensionConfigFromSqlite } from "./extension-config";
 import { JOBMATE_EXTENSION_VERSION, pingExtensionVersion } from "./extension-version";
 import { ContactsModal, JobResultCard, type ResultJobRow } from "./results-panel";
+import { getStoredTheme, toggleTheme, type JobmateTheme } from "./theme";
 
 type PageId = "home" | "config";
 type HomeSortBy = "alpha" | "retrieved" | "listed";
-
-const NAV: { id: PageId; label: string }[] = [
-  { id: "home", label: "Home" },
-  { id: "config", label: "Config" }
-];
 
 function parseHomeSortBy(value: string): HomeSortBy {
   if (value === "alpha" || value === "retrieved" || value === "listed") {
@@ -85,6 +81,7 @@ export function JobmateApp() {
   const [userId, setUserId] = useState<string | null>(null);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [theme, setTheme] = useState<JobmateTheme>("dark");
 
   const [profile, setProfile] = useState<Record<string, unknown> | null>(null);
 
@@ -135,6 +132,10 @@ export function JobmateApp() {
 
 
   useEffect(() => {
+    setTheme(getStoredTheme());
+  }, []);
+
+  useEffect(() => {
     function onExtensionMessage(ev: MessageEvent) {
       const data = ev.data as {
         source?: string;
@@ -160,8 +161,20 @@ export function JobmateApp() {
       }
       if (data.type === "JOBMATE_APPLY_CLOSED") {
         const closedTabId = typeof data.tabId === "number" ? data.tabId : null;
-        if (closedTabId === null) return;
-        setApplySessions(prev => prev.filter(s => (s.tabId ?? null) !== closedTabId));
+        const closedApplyUrl = typeof data.applyUrl === "string" && data.applyUrl.trim()
+          ? normalizeApplyUrl(data.applyUrl.trim())
+          : "";
+        setApplySessions(prev =>
+          prev.filter(s => {
+            if (closedTabId !== null && (s.tabId ?? null) === closedTabId) {
+              return false;
+            }
+            if (closedApplyUrl && s.applyUrl === closedApplyUrl) {
+              return false;
+            }
+            return true;
+          })
+        );
         return;
       }
       if (data.type !== "JOBMATE_APPLY_ATTENTION") {
@@ -765,7 +778,7 @@ export function JobmateApp() {
       setApplySessions(prev => [...prev, newSession]);
 
       try {
-        await openApplyTabViaExtension(applyUrlNormalized, sessionId, {
+        const { tabId } = await openApplyTabViaExtension(applyUrlNormalized, sessionId, {
           jobId,
           title: String(job.source_title ?? ""),
           company: String(job.company ?? ""),
@@ -774,13 +787,16 @@ export function JobmateApp() {
           linkedinLinks: Array.isArray(linkedinLinks) ? linkedinLinks.map(String) : [],
           hiringContacts: Array.isArray(hiringContacts) ? hiringContacts.map(String) : []
         });
+        setApplySessions(prev =>
+          prev.map(s =>
+            s.jobId === jobId ? { ...s, status: "Applying…", tabId: typeof tabId === "number" ? tabId : s.tabId } : s
+          )
+        );
       } catch (err) {
         toast.error(err instanceof Error ? err.message : String(err));
         setApplySessions(prev => prev.filter(s => s.jobId !== jobId));
         return;
       }
-
-      setApplySessions(prev => prev.map(s => s.jobId === jobId ? { ...s, status: "Applying…" } : s));
     },
     [sqlite, userId, applySessions]
   );
@@ -972,7 +988,7 @@ export function JobmateApp() {
 
   if (error) {
     return (
-      <div className="min-h-screen bg-white px-6 py-8 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
+      <div className="jm-page-bg min-h-screen px-6 py-8">
         <p className="text-sm text-red-600 dark:text-red-400">{error.message}</p>
       </div>
     );
@@ -980,7 +996,7 @@ export function JobmateApp() {
 
   if (!ready) {
     return (
-      <div className="min-h-screen bg-white px-6 py-8 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
+      <div className="jm-page-bg min-h-screen px-6 py-8">
         <p className="text-sm text-gray-500 dark:text-gray-400">Gathering data…</p>
       </div>
     );
@@ -988,7 +1004,7 @@ export function JobmateApp() {
 
   if (userBootstrap === "pending") {
     return (
-      <div className="min-h-screen bg-white px-6 py-8 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
+      <div className="jm-page-bg min-h-screen px-6 py-8">
         <p className="text-sm text-gray-500 dark:text-gray-400">Loading…</p>
       </div>
     );
@@ -997,7 +1013,7 @@ export function JobmateApp() {
   if (userId === null) {
     if (fetchError) {
       return (
-        <div className="min-h-screen bg-white px-6 py-8 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
+        <div className="jm-page-bg min-h-screen px-6 py-8">
           <p className="text-sm text-red-600 dark:text-red-400">{fetchError}</p>
         </div>
       );
@@ -1005,7 +1021,7 @@ export function JobmateApp() {
 
     if (!sqlite) {
       return (
-        <div className="min-h-screen bg-white px-6 py-8 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
+        <div className="jm-page-bg min-h-screen px-6 py-8">
           <p className="text-sm text-gray-500 dark:text-gray-400">Loading…</p>
         </div>
       );
@@ -1016,7 +1032,7 @@ export function JobmateApp() {
 
   if (!setupGateResolved) {
     return (
-      <div className="min-h-screen bg-white px-6 py-8 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
+      <div className="jm-page-bg min-h-screen px-6 py-8">
         <p className="text-sm text-gray-500 dark:text-gray-400">Loading…</p>
       </div>
     );
@@ -1025,7 +1041,7 @@ export function JobmateApp() {
   if (!setupComplete) {
     if (!sqlite) {
       return (
-        <div className="min-h-screen bg-white px-6 py-8 text-gray-900 dark:bg-gray-950 dark:text-gray-100">
+        <div className="jm-page-bg min-h-screen px-6 py-8">
           <p className="text-sm text-gray-500 dark:text-gray-400">Loading…</p>
         </div>
       );
@@ -1043,8 +1059,34 @@ export function JobmateApp() {
   }
 
   return (
-    <div className="relative flex h-dvh min-h-0 flex-col bg-white text-gray-900 dark:bg-gray-950 dark:text-gray-100">
-      {applySessions.map((s, i) => (
+    <div className="jm-app relative flex h-dvh min-h-0 flex-col">
+      <header className="jm-header shrink-0 z-30">
+        <button
+          type="button"
+          onClick={() => setPage("home")}
+          className="jm-header-title text-lg border-none bg-transparent p-0 cursor-pointer"
+        >
+          JOB<span>MATE</span>
+        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setPage("config")}
+            className={`jm-theme-toggle ${page === "config" ? "jm-tab-active" : ""}`}
+          >
+            ⚙️ Settings
+          </button>
+          <button
+            type="button"
+            className="jm-theme-toggle"
+            onClick={() => setTheme((current) => toggleTheme(current))}
+          >
+            {theme === "dark" ? "☀️ Light Mode" : "🌙 Dark Mode"}
+          </button>
+        </div>
+      </header>
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        {applySessions.map((s, i) => (
         <ApplySessionBadge
           key={s.jobId}
           session={s}
@@ -1071,27 +1113,6 @@ export function JobmateApp() {
           onDismiss={() => setExtensionVersionModal(null)}
         />
       ) : null}
-      <div className="peer/sidebar pointer-events-auto absolute left-0 top-0 z-40 h-full w-3" />
-      <aside className="pointer-events-none absolute left-0 top-0 z-50 flex h-full w-52 -translate-x-full flex-col border-r border-gray-200 bg-white opacity-0 transition-all duration-200 peer-hover/sidebar:pointer-events-auto peer-hover/sidebar:translate-x-0 peer-hover/sidebar:opacity-100 hover:pointer-events-auto hover:translate-x-0 hover:opacity-100 focus-within:pointer-events-auto focus-within:translate-x-0 focus-within:opacity-100 dark:border-gray-800 dark:bg-gray-950">
-        <div className="border-b border-gray-200 px-4 py-5 dark:border-gray-800">
-          <h1 className="text-lg font-semibold tracking-tight">JobMate</h1>
-        </div>
-        <nav className="flex flex-col gap-0.5 p-2">
-          {NAV.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => setPage(item.id)}
-              className={`rounded-md px-3 py-2 text-left text-sm transition-colors ${page === item.id
-                ? "bg-gray-100 font-medium dark:bg-gray-900"
-                : "text-gray-700 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-900/60"
-                }`}
-            >
-              {item.label}
-            </button>
-          ))}
-        </nav>
-      </aside>
       <main
         className={`flex min-h-0 w-full flex-1 flex-col px-8 ${page === "home" ? "overflow-hidden pt-10 pb-0" : "overflow-auto py-10"}`}
       >
@@ -1147,6 +1168,7 @@ export function JobmateApp() {
           onSaved={bumpData}
         />
       ) : null}
+      </div>
     </div>
   );
 }
@@ -1156,11 +1178,11 @@ function ExtensionVersionModal(props: { installed: string; expected: string; onD
   const missing = !installed.trim();
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4">
+    <div className="jm-overlay fixed inset-0 z-[60] flex items-center justify-center p-4">
       <div
         role="dialog"
         aria-modal="true"
-        className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-6 shadow-xl dark:border-gray-700 dark:bg-gray-900"
+        className="jm-panel w-full max-w-md p-6"
       >
         <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
           {missing ? "Chrome extension required" : "Chrome extension update required"}
@@ -1215,15 +1237,21 @@ function ApplySessionBadge(props: {
   const topOffset = 16 + index * 220;
 
   return (
-    <div className="fixed right-4 z-50 w-72 rounded-xl border shadow-lg bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-700 overflow-hidden" style={{ top: topOffset }}>
-      <div className={`px-4 py-2 flex items-center justify-between ${isAttention ? "bg-amber-50 dark:bg-amber-950 border-b border-amber-200 dark:border-amber-800" : "bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700"}`}>
-        <span className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+    <div className="jm-panel fixed right-4 z-50 w-72 overflow-hidden shadow-lg" style={{ top: topOffset }}>
+      <div
+        className="flex items-center justify-between border-b px-4 py-2"
+        style={{
+          borderColor: "var(--color-border)",
+          backgroundColor: isAttention ? "var(--color-bg-head)" : "var(--color-bg-side)"
+        }}
+      >
+        <span className="jm-section-title text-xs">
           {isAttention ? "⚠ Apply" : "▶ Apply"}
         </span>
         <button
           type="button"
           onClick={onDismiss}
-          className="text-xs text-gray-400 hover:text-gray-600 dark:hover:text-gray-200"
+          className="jm-muted text-xs hover:opacity-80"
         >
           ✕
         </button>
@@ -1246,14 +1274,14 @@ function ApplySessionBadge(props: {
           <button
             type="button"
             onClick={onInterrupt}
-            className="w-full rounded-lg border border-amber-300 px-3 py-2 text-sm font-medium text-amber-700 hover:bg-amber-50 dark:border-amber-800 dark:text-amber-400 dark:hover:bg-amber-950/30"
+            className="jm-btn-ghost w-full px-3 py-2 text-sm"
           >
             Interrupt
           </button>
           <button
             type="button"
             onClick={onDoneApplying}
-            className="w-full rounded-lg bg-emerald-600 px-3 py-2 text-sm font-medium text-white hover:bg-emerald-700"
+            className="jm-btn-primary w-full px-3 py-2 text-sm"
           >
             Done applying
           </button>
@@ -1270,7 +1298,7 @@ function ApplySessionBadge(props: {
           <button
             type="button"
             onClick={onInterrupt}
-            className="w-full rounded-lg border border-amber-300 px-3 py-2 text-sm font-medium text-amber-700 hover:bg-amber-50 dark:border-amber-800 dark:text-amber-400 dark:hover:bg-amber-950/30"
+            className="jm-btn-ghost w-full px-3 py-2 text-sm"
           >
             Interrupt
           </button>
@@ -1439,7 +1467,7 @@ function HomePanel(props: {
   return (
     <div className="flex h-full min-h-0 flex-col gap-4">
       <div className="flex shrink-0 flex-wrap items-center justify-between gap-3">
-        <h2 className="text-xl font-semibold tracking-tight">Home</h2>
+        <h2 className="jm-header-title text-xl">Home</h2>
         <div className="flex items-center gap-3">
           <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
             <span className="text-xs text-gray-500 dark:text-gray-400">Jobs per target</span>
@@ -1449,14 +1477,14 @@ function HomePanel(props: {
               max={500}
               value={perTargetLimit}
               onChange={(ev) => onPerTargetLimitChange(Math.max(1, parseInt(ev.target.value, 10) || 1))}
-              className="w-20 rounded-md border border-gray-300 bg-white px-2 py-1 text-sm tabular-nums dark:border-gray-700 dark:bg-gray-900"
+              className="jm-input w-20 px-2 py-1 text-sm tabular-nums"
             />
           </label>
           <button
             type="button"
             disabled={runDisabled}
             onClick={() => void onRunSearch()}
-            className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900"
+            className="jm-btn-primary px-4 py-2 disabled:opacity-50"
           >
             {ingestRunning ? "Running…" : `Run ${enabledTargetsCount} target${enabledTargetsCount === 1 ? "" : "s"}`}
           </button>
@@ -1464,83 +1492,29 @@ function HomePanel(props: {
       </div>
 
       <section className="shrink-0 space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setTargetsOpen((open) => !open)}
-              className="rounded-md border border-gray-300 px-2.5 py-1 text-xs font-medium hover:bg-gray-50 dark:border-gray-700 dark:hover:bg-gray-900/60"
-              aria-expanded={targetsOpen}
-            >
-              {targetsOpen ? "Hide targets" : "Show targets"}
-            </button>
-            <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300">
-              Targets
-              <span className="ml-2 text-xs font-normal text-gray-500 dark:text-gray-400">
-                {selectedTargetIds.size} selected
-              </span>
-            </h3>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={() => onSelectBucket("applied")}
-              className={`rounded-md border px-2.5 py-1 text-xs font-medium ${bucketFilter === "applied"
-                ? "border-gray-900 bg-gray-100 dark:border-gray-100 dark:bg-gray-900"
-                : "border-gray-300 hover:bg-gray-50 dark:border-gray-700 dark:hover:bg-gray-900/60"
-                }`}
-            >
-              Applied Jobs
-            </button>
-            <button
-              type="button"
-              onClick={() => onSelectBucket("archived")}
-              className={`rounded-md border px-2.5 py-1 text-xs font-medium ${bucketFilter === "archived"
-                ? "border-gray-900 bg-gray-100 dark:border-gray-100 dark:bg-gray-900"
-                : "border-gray-300 hover:bg-gray-50 dark:border-gray-700 dark:hover:bg-gray-900/60"
-                }`}
-            >
-              Archived Jobs
-            </button>
-            <button
-              type="button"
-              onClick={onAdd}
-              className="rounded-md border border-gray-300 px-2.5 py-1 text-xs font-medium hover:bg-gray-50 dark:border-gray-700 dark:hover:bg-gray-900/60"
-            >
-              New target
-            </button>
-            {confirmClearHistory ? (
-              <>
-                <button
-                  type="button"
-                  onClick={() => setConfirmClearHistory(false)}
-                  className="rounded-md border border-gray-300 px-2.5 py-1 text-xs dark:border-gray-700"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void onClearHistory()}
-                  className="rounded-md border border-red-300 px-2.5 py-1 text-xs text-red-700 dark:border-red-900 dark:text-red-400"
-                >
-                  Confirm clear history
-                </button>
-              </>
-            ) : (
-              <button
-                type="button"
-                onClick={() => setConfirmClearHistory(true)}
-                className="rounded-md border border-gray-300 px-2.5 py-1 text-xs dark:border-gray-700"
-              >
-                Clear history
-              </button>
-            )}
-          </div>
-        </div>
-        {targetsOpen ? (
-          <div className="flex gap-3 overflow-x-auto pb-1">
+        <button
+          type="button"
+          onClick={() => setTargetsOpen((open) => !open)}
+          className="jm-targets-toggle"
+          aria-expanded={targetsOpen}
+        >
+          <span
+            className={`jm-targets-chevron ${targetsOpen ? "jm-targets-chevron-open" : ""}`}
+            aria-hidden
+          >
+            ▶
+          </span>
+          Targets
+          <span className="jm-muted text-xs font-normal">
+            {selectedTargetIds.size} selected
+          </span>
+        </button>
+        <div className={`jm-targets-panel ${targetsOpen ? "jm-targets-panel-open" : ""}`}>
+          <div className="jm-targets-panel-inner">
+            <div className="jm-targets-container">
+              <div className="flex gap-3 overflow-x-auto pb-1">
             {prefs.length === 0 ? (
-              <div className="rounded-xl border border-gray-200 px-4 py-6 text-center text-sm text-gray-500 dark:border-gray-800 dark:text-gray-400">
+              <div className="jm-muted w-full px-4 py-6 text-center text-sm">
                 No targets yet. Add one to get started.
               </div>
             ) : (
@@ -1548,9 +1522,7 @@ function HomePanel(props: {
                 <div
                   key={p.id}
                   onClick={() => onToggleTarget(p.id)}
-                  className={`flex h-full w-64 shrink-0 cursor-pointer flex-col rounded-xl border p-4 transition-colors ${selectedTargetIds.has(p.id)
-                    ? "border-gray-900 bg-gray-100 dark:border-gray-100 dark:bg-gray-900"
-                    : "border-gray-200 hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900/60"
+                  className={`jm-card flex h-full w-64 shrink-0 cursor-pointer flex-col p-4 transition-colors ${selectedTargetIds.has(p.id) ? "jm-selected" : ""
                     }`}
                 >
                   <div className="flex items-start justify-between gap-3">
@@ -1596,28 +1568,10 @@ function HomePanel(props: {
                 </div>
               ))
             )}
-            <button
-              type="button"
-              onClick={() => onSelectBucket("applied")}
-              className={`flex h-full w-64 shrink-0 flex-col rounded-xl border p-4 text-left transition-colors ${bucketFilter === "applied"
-                ? "border-gray-900 bg-gray-100 dark:border-gray-100 dark:bg-gray-900"
-                : "border-gray-200 hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900/60"
-                }`}
-            >
-              <p className="text-sm font-semibold">Applied Jobs</p>
-            </button>
-            <button
-              type="button"
-              onClick={() => onSelectBucket("archived")}
-              className={`flex h-full w-64 shrink-0 flex-col rounded-xl border p-4 text-left transition-colors ${bucketFilter === "archived"
-                ? "border-gray-900 bg-gray-100 dark:border-gray-100 dark:bg-gray-900"
-                : "border-gray-200 hover:bg-gray-50 dark:border-gray-800 dark:hover:bg-gray-900/60"
-                }`}
-            >
-              <p className="text-sm font-semibold">Archived Jobs</p>
-            </button>
+              </div>
+            </div>
           </div>
-        ) : null}
+        </div>
       </section>
 
       <section className="flex min-h-0 flex-1 flex-col gap-4">
@@ -1635,7 +1589,7 @@ function HomePanel(props: {
                 <button
                   type="button"
                   onClick={() => void runBulk("apply")}
-                  className="rounded-lg bg-gray-900 px-3 py-1.5 text-sm font-medium text-white dark:bg-gray-100 dark:text-gray-900"
+                  className="jm-btn-primary px-3 py-1.5"
                 >
                   Mass apply
                 </button>
@@ -1656,20 +1610,72 @@ function HomePanel(props: {
               </>
             ) : null}
           </div>
-          <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
-            <span>Sort</span>
-            <select
-              value={sortBy}
-              onChange={(ev) => void changeSort(ev.target.value)}
-              className="rounded-md border border-gray-300 bg-white px-2 py-1 text-sm dark:border-gray-700 dark:bg-gray-900"
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => onSelectBucket("applied")}
+              className={`text-xs ${bucketFilter === "applied" ? "jm-tab jm-tab-active" : "jm-tab"}`}
             >
-              <option value="alpha">Alphabetical</option>
-              <option value="retrieved">Date retrieved</option>
-              <option value="listed">Date listed</option>
-            </select>
-          </label>
+              Applied Jobs
+            </button>
+            <button
+              type="button"
+              onClick={() => onSelectBucket("archived")}
+              className={`text-xs ${bucketFilter === "archived" ? "jm-tab jm-tab-active" : "jm-tab"}`}
+            >
+              Archived Jobs
+            </button>
+            <button
+              type="button"
+              onClick={onAdd}
+              className="jm-btn-ghost text-xs"
+            >
+              New target
+            </button>
+            {confirmClearHistory ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setConfirmClearHistory(false)}
+                  className="jm-btn-ghost text-xs"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void onClearHistory()}
+                  className="rounded-md border border-red-300 px-2.5 py-1 text-xs text-red-700 dark:border-red-900 dark:text-red-400"
+                >
+                  Confirm clear history
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setConfirmClearHistory(true)}
+                className="jm-btn-ghost text-xs"
+              >
+                Clear history
+              </button>
+            )}
+            <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+              <span>Sort</span>
+              <select
+                value={sortBy}
+                onChange={(ev) => void changeSort(ev.target.value)}
+                className="jm-input px-2 py-1 text-sm"
+              >
+                <option value="alpha">Alphabetical</option>
+                <option value="retrieved">Date retrieved</option>
+                <option value="listed">Date listed</option>
+              </select>
+            </label>
+          </div>
         </div>
-        <div className="flex min-h-0 flex-1 overflow-hidden rounded-xl border border-gray-200 bg-white dark:border-gray-800 dark:bg-gray-950">
+        <div
+          className="flex min-h-0 flex-1 overflow-hidden rounded-xl border"
+          style={{ borderColor: "var(--color-border)", backgroundColor: "var(--color-bg-side)" }}
+        >
           {isBucket ? (
             <div className="flex min-h-0 h-full w-full flex-col">
               {bucketFilter === "applied" ? (
@@ -1711,7 +1717,7 @@ function HomePanel(props: {
                           {j.applied_at ?? j.archived_at ?? j.discovered_at}
                         </p>
                         <div className="flex flex-wrap gap-2">
-                          <button type="button" onClick={() => void onRestoreJob(j.id)} className="text-sm text-blue-700 underline dark:text-blue-400">
+                          <button type="button" onClick={() => void onRestoreJob(j.id)} className="jm-link text-sm">
                             {bucketFilter === "archived" ? "Unarchive" : "Unapply"}
                           </button>
                           <button type="button" onClick={() => void onDeleteJob(j.id)} className="text-sm text-red-700 underline dark:text-red-400">
@@ -1748,7 +1754,7 @@ function HomePanel(props: {
                 </div>
               ) : (
                 <div className="min-h-0 h-full w-full overflow-auto">
-                  <div className="grid w-full gap-0.5 p-0.5 [grid-template-columns:repeat(auto-fill,minmax(min(100%,280px),1fr))]">
+                  <div className="grid w-full gap-3 p-1 [grid-template-columns:repeat(auto-fill,minmax(min(100%,400px),1fr))]">
                     {sortedVisibleResultJobs.map((j) => (
                       <JobResultCard
                         key={j.id}
@@ -2217,28 +2223,27 @@ function ConfigPanel(props: {
     return null;
   }
 
-  const fi =
-    "mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-100";
-  const lb = "block text-sm font-medium text-gray-700 dark:text-gray-300";
-  const st = "mt-1 text-xs text-gray-500 dark:text-gray-400";
+  const fi = "jm-input mt-1 w-full px-3 py-2 text-sm";
+  const lb = "block text-sm font-medium";
+  const st = "jm-muted mt-1 text-xs";
 
   return (
     <div className="max-w-xl space-y-8">
       <div>
         <h2 className="text-xl font-semibold tracking-tight">Config</h2>
-        <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">API keys, profile, and Chrome extension download.</p>
+        <p className="jm-muted mt-1 text-sm">API keys, profile, and Chrome extension download.</p>
       </div>
 
-      <section className="rounded-xl border border-gray-200 p-4 dark:border-gray-800">
+      <section className="jm-panel rounded-xl p-4">
         <h3 className="text-sm font-semibold">Chrome extension</h3>
-        <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">
+        <p className="jm-muted mt-2 text-sm">
           Download the unpacked extension, then in Chrome open chrome://extensions, enable Developer mode, choose Load unpacked,
           and extract the zip.
         </p>
         <a
           href="/chrome-extension.zip"
           download
-          className="mt-3 inline-block text-sm font-medium text-blue-700 underline dark:text-blue-400"
+          className="jm-link mt-3 inline-block text-sm font-medium"
         >
           Download chrome-extension.zip
         </a>
@@ -2356,7 +2361,7 @@ function ConfigPanel(props: {
           type="button"
           disabled={cfgBusy}
           onClick={() => void saveApiSettings()}
-          className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900"
+          className="jm-btn-primary px-4 py-2 disabled:opacity-50"
         >
           Save API settings
         </button>
@@ -2445,7 +2450,7 @@ function ConfigPanel(props: {
           type="button"
           disabled={cfgBusy}
           onClick={() => void saveProfile()}
-          className="rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-gray-100 dark:text-gray-900"
+          className="jm-btn-primary px-4 py-2 disabled:opacity-50"
         >
           Save profile
         </button>

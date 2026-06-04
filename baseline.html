@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Palette Showcase - Themes & PT Serif</title>
+    <!-- Google Fonts: PT Serif -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=PT+Serif:wght@300;400;500;600;700&display=swap"
+        rel="stylesheet">
+
+    <style>
+        /* SITE THEMES (THE COLOR HUNT PALETTE INTERPRETATION) */
+        [data-theme="dark"] {
+            --color-bg-main: #454040;
+            /* Main background (Dark Charcoal) */
+            --color-bg-side: #3b3737;
+            /* Sidebar background */
+            --color-bg-head: #363232;
+            /* Header background */
+            --color-card: #605B51;
+            /* Card container (Muted Taupe) */
+            --color-card-media: #4e4a42;
+            /* Inner card placeholder */
+            --color-accent-subtle: #D8D365;
+            /* Dusty Yellow secondary accent */
+            --color-accent-bright: #E6F082;
+            /* Light Lime highlight/interactive */
+            --color-text-primary: #F5F5F5;
+            /* Main text */
+            --color-text-secondary: #D1CDCD;
+            /* Dimmed text */
+            --color-border: #605B51;
+            /* Borders */
+        }
+
+        [data-theme="light"] {
+            --color-bg-main: #FAFAFA;
+            /* Crisp clean background */
+            --color-bg-side: #F0EFEA;
+            /* Light slate/taupe tint sidebar */
+            --color-bg-head: #E8E7E0;
+            /* Header background */
+            --color-card: #FFFFFF;
+            /* Pure white cards */
+            --color-card-media: #605B51;
+            /* Dark Taupe for strong media contrast */
+            --color-accent-subtle: #87832B;
+            /* Deepened Dusty Yellow for readability */
+            --color-accent-bright: #4F5413;
+            /* Deep Olive variant of lime for text contrast */
+            --color-text-primary: #454040;
+            /* Dark Charcoal for main text body */
+            --color-text-secondary: #605B51;
+            /* Muted Taupe for secondary text */
+            --color-border: #D8D365;
+            /* Accented borders */
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
+        }
+
+        body {
+            font-family: 'PT Serif', serif;
+            background-color: var(--color-bg-main);
+            color: var(--color-text-primary);
+            display: flex;
+            flex-direction: column;
+            min-height: 100vh;
+        }
+
+        /* HEADER */
+        header {
+            background-color: var(--color-bg-head);
+            padding: 1.5rem 2rem;
+            border-bottom: 2px solid var(--color-border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        header h1 {
+            font-weight: 700;
+            font-size: 1.5rem;
+            letter-spacing: 0.5px;
+        }
+
+        header h1 span {
+            color: var(--color-accent-subtle);
+        }
+
+        /* THEME TOGGLE SWITCH BUTTON */
+        .theme-toggle-btn {
+            background-color: var(--color-card);
+            border: 2px solid var(--color-border);
+            color: var(--color-text-primary);
+            padding: 0.5rem 1.2rem;
+            font-family: 'PT Serif', serif;
+            font-weight: 600;
+            font-size: 0.85rem;
+            border-radius: 20px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+        }
+
+        .theme-toggle-btn:hover {
+            opacity: 0.9;
+        }
+
+        /* MAIN CONTENT SECTION */
+        .container {
+            display: flex;
+            flex: 1;
+        }
+
+        /* SIDEBAR */
+        aside {
+            width: 280px;
+            background-color: var(--color-bg-side);
+            border-right: 1px solid var(--color-border);
+            padding: 2rem;
+            display: flex;
+            flex-direction: column;
+            gap: 2rem;
+        }
+
+        .sidebar-section h3 {
+            font-size: 1.1rem;
+            color: var(--color-accent-subtle);
+            margin-bottom: 1rem;
+            text-transform: uppercase;
+            font-weight: 700;
+        }
+
+        .sidebar-menu {
+            list-style: none;
+        }
+
+        .sidebar-menu li {
+            margin-bottom: 0.8rem;
+        }
+
+        .sidebar-menu a {
+            color: var(--color-text-secondary);
+            text-decoration: none;
+            font-weight: 400;
+        }
+
+        .sidebar-menu a:hover,
+        .sidebar-menu a.active {
+            color: var(--color-accent-bright);
+            font-weight: 600;
+        }
+
+        /* MAIN APP CANVAS */
+        main {
+            flex: 1;
+            padding: 2rem;
+            display: flex;
+            flex-direction: column;
+            gap: 2rem;
+        }
+
+        /* TABS */
+        .filter-tabs {
+            display: flex;
+            gap: 1rem;
+            border-bottom: 1px solid var(--color-border);
+            padding-bottom: 1rem;
+        }
+
+        .tab-btn {
+            background: transparent;
+            border: 2px solid var(--color-border);
+            color: var(--color-text-secondary);
+            padding: 0.5rem 1.5rem;
+            font-family: 'PT Serif', serif;
+            font-weight: 600;
+            font-size: 0.9rem;
+            cursor: pointer;
+            border-radius: 4px;
+        }
+
+        .tab-btn:hover {
+            border-color: var(--color-accent-subtle);
+            color: var(--color-accent-subtle);
+        }
+
+        .tab-btn.active {
+            background-color: var(--color-accent-bright);
+            border-color: var(--color-accent-bright);
+            /* Handle dark/light specific contrast overlay text natively */
+            color: var(--color-bg-main);
+        }
+
+        /* RESPONSIVE CARD GRID */
+        .card-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 2rem;
+        }
+
+        /* CARD */
+        .card {
+            background-color: var(--color-card);
+            border-radius: 8px;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.15);
+            border: 1px solid rgba(0, 0, 0, 0.05);
+        }
+
+        .card-image-placeholder {
+            height: 160px;
+            background-color: var(--color-card-media);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--color-accent-subtle);
+            font-size: 1.8rem;
+            font-weight: 300;
+            border-bottom: 4px solid var(--color-accent-subtle);
+        }
+
+        [data-theme="light"] .card-image-placeholder {
+            color: #FFFFFF;
+        }
+
+        .card-content {
+            padding: 1.5rem;
+            display: flex;
+            flex-direction: column;
+            flex: 1;
+            gap: 0.75rem;
+        }
+
+        .card-tag {
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            font-weight: 700;
+            color: var(--color-accent-bright);
+        }
+
+        .card-title {
+            font-size: 1.3rem;
+            font-weight: 600;
+            color: var(--color-text-primary);
+        }
+
+        .card-description {
+            font-size: 0.95rem;
+            color: var(--color-text-secondary);
+            line-height: 1.6;
+            flex: 1;
+        }
+
+        .card-action-btn {
+            background-color: transparent;
+            border: 2px solid var(--color-accent-bright);
+            color: var(--color-accent-bright);
+            padding: 0.6rem;
+            font-family: 'PT Serif', serif;
+            font-weight: 700;
+            text-transform: uppercase;
+            font-size: 0.8rem;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-top: 0.5rem;
+        }
+
+        .card-action-btn:hover {
+            background-color: var(--color-accent-bright);
+            color: var(--color-bg-main);
+        }
+
+        /* ADAPTIVE MOBILE LAYOUT */
+        @media (max-width: 768px) {
+            .container {
+                flex-direction: column;
+            }
+
+            aside {
+                width: 100%;
+                border-right: none;
+                border-bottom: 1px solid var(--color-border);
+                padding: 1.5rem;
+            }
+
+            main {
+                padding: 1.5rem;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+    <!-- Header Frame -->
+    <header>
+        <h1>SLAB<span>PANEL</span></h1>
+        <button class="theme-toggle-btn" id="themeToggle" onclick="toggleTheme()">
+            <span id="themeToggleText">☀️ Light Mode</span>
+        </button>
+    </header>
+
+    <!-- App Shell Frame -->
+    <div class="container">
+
+        <!-- Sidebar Shell -->
+        <aside>
+            <div class="sidebar-section">
+                <h3>Navigation</h3>
+                <ul class="sidebar-menu">
+                    <li><a href="#" class="active">Collection</a></li>
+                    <li><a href="#">Metrics</a></li>
+                    <li><a href="#">Archived Assets</a></li>
+                </ul>
+            </div>
+            <div class="sidebar-section">
+                <h3>Preferences</h3>
+                <ul class="sidebar-menu">
+                    <li><a href="#">Config</a></li>
+                </ul>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main>
+
+            <!-- Filters -->
+            <div class="filter-tabs">
+                <button class="tab-btn active">All Items</button>
+                <button class="tab-btn">Trending</button>
+                <button class="tab-btn">Favorites</button>
+            </div>
+
+            <!-- Card Layout Grid -->
+            <div class="card-grid">
+
+                <!-- Card Instance 1 -->
+                <article class="card">
+                    <div class="card-image-placeholder">#001</div>
+                    <div class="card-content">
+                        <span class="card-tag">Architecture</span>
+                        <h2 class="card-title">PT Serif Slab-Serif</h2>
+                        <p class="card-description">PT Serif features geometric shapes mixed with friendly, open curves,
+                            functioning beautifully as structural header blocks.</p>
+                        <button class="card-action-btn">View Asset</button>
+                    </div>
+                </article>
+
+                <!-- Card Instance 2 -->
+                <article class="card">
+                    <div class="card-image-placeholder">#002</div>
+                    <div class="card-content">
+                        <span class="card-tag">Engineering</span>
+                        <h2 class="card-title">Dynamic Theming Systems</h2>
+                        <p class="card-description">Using simple HTML attribute selectors dynamically shifts target UI
+                            hex weights safely across variables.</p>
+                        <button class="card-action-btn">View Asset</button>
+                    </div>
+                </article>
+
+                <!-- Card Instance 3 -->
+                <article class="card">
+                    <div class="card-image-placeholder">#003</div>
+                    <div class="card-content">
+                        <span class="card-tag">Visual Balance</span>
+                        <h2 class="card-title">Color Hunt 454040</h2>
+                        <p class="card-description">Preserving natural accent weight variations helps cleanly shift
+                            identities when rendering dark mode alternatives cleanly.</p>
+                        <button class="card-action-btn">View Asset</button>
+                    </div>
+                </article>
+
+            </div>
+        </main>
+    </div>
+
+    <!-- Theme Control Logic Script -->
+    <script>
+        function toggleTheme() {
+            const htmlTag = document.documentElement;
+            const toggleText = document.getElementById('themeToggleText');
+            const currentTheme = htmlTag.getAttribute('data-theme');
+
+            if (currentTheme === 'dark') {
+                htmlTag.setAttribute('data-theme', 'light');
+                toggleText.innerHTML = '🌙 Dark Mode';
+            } else {
+                htmlTag.setAttribute('data-theme', 'dark');
+                toggleText.innerHTML = '☀️ Light Mode';
+            }
+        }
+    </script>
+</body>
+
+</html>

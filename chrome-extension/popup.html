@@ -1,58 +1,286 @@
 <!doctype html>
 <html>
+
 <head>
   <meta charset="utf-8">
   <title>JobMate</title>
   <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { width: 380px; font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0f172a; color: #e2e8f0; }
-    .tabs { display: flex; border-bottom: 1px solid #1e293b; }
-    .tab { flex: 1; padding: 10px; text-align: center; cursor: pointer; font-size: 13px; font-weight: 500; color: #64748b; border: none; background: none; }
-    .tab.active { color: #e2e8f0; border-bottom: 2px solid #38bdf8; margin-bottom: -1px; }
-    .tab:hover:not(.active) { color: #94a3b8; }
-    .panel { display: none; padding: 14px; max-height: 560px; overflow-y: auto; }
-    .panel.active { display: block; }
-    .logo { font-size: 15px; font-weight: 700; color: #38bdf8; margin-bottom: 10px; }
-    .desc { font-size: 12px; color: #64748b; margin-bottom: 14px; line-height: 1.5; }
-    .fill-btn { width: 100%; padding: 11px; background: #0ea5e9; color: white; border: none; border-radius: 7px; font: 14px/1 -apple-system, sans-serif; font-weight: 600; cursor: pointer; }
-    .fill-btn:disabled { background: #1e3a4a; color: #4b6272; cursor: default; }
-    .fill-btn:hover:not(:disabled) { background: #0284c7; }
-    #fill-status { margin-top: 10px; font-size: 12px; min-height: 16px; }
-    #fill-status.ok { color: #34d399; }
-    #fill-status.error { color: #f87171; }
-    #fill-status.info { color: #64748b; }
-    .section { margin-bottom: 14px; }
-    .section-title { font-size: 11px; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 8px; }
-    label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 3px; }
-    input[type=text], input[type=password], input[type=email], textarea, select {
-      width: 100%; padding: 7px 9px; background: #1e293b; border: 1px solid #334155; border-radius: 5px;
-      color: #e2e8f0; font: 13px -apple-system, sans-serif; outline: none;
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
     }
-    input:focus, textarea:focus, select:focus { border-color: #38bdf8; }
-    textarea { resize: vertical; min-height: 70px; }
-    .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    .save-row { display: flex; gap: 8px; margin-top: 6px; }
-    .save-btn { flex: 1; padding: 9px; background: #0ea5e9; color: white; border: none; border-radius: 6px; font: 13px -apple-system, sans-serif; font-weight: 600; cursor: pointer; }
-    .save-btn:hover { background: #0284c7; }
-    #save-status { font-size: 12px; align-self: center; }
-    #save-status.ok { color: #34d399; }
-    #save-status.error { color: #f87171; }
-    .resume-name { font-size: 11px; color: #38bdf8; margin-top: 4px; word-break: break-all; }
-    .resume-clear { font-size: 11px; color: #64748b; cursor: pointer; margin-left: 6px; }
-    .resume-clear:hover { color: #f87171; }
-    input[type=file] { width: 100%; font-size: 12px; color: #94a3b8; cursor: pointer; }
+
+    body {
+      width: 380px;
+      font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+    }
+
+    .tabs {
+      display: flex;
+      border-bottom: 1px solid #1e293b;
+    }
+
+    .tab {
+      flex: 1;
+      padding: 10px;
+      text-align: center;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 500;
+      color: #64748b;
+      border: none;
+      background: none;
+    }
+
+    .tab.active {
+      color: #e2e8f0;
+      border-bottom: 2px solid #38bdf8;
+      margin-bottom: -1px;
+    }
+
+    .tab:hover:not(.active) {
+      color: #94a3b8;
+    }
+
+    .panel {
+      display: none;
+      padding: 14px;
+      max-height: 560px;
+      overflow-y: auto;
+    }
+
+    .panel.active {
+      display: block;
+    }
+
+    .logo {
+      font-size: 15px;
+      font-weight: 700;
+      color: #38bdf8;
+      margin-bottom: 10px;
+    }
+
+    .desc {
+      font-size: 12px;
+      color: #64748b;
+      margin-bottom: 14px;
+      line-height: 1.5;
+    }
+
+    .fill-btn {
+      width: 100%;
+      padding: 11px;
+      background: #0ea5e9;
+      color: white;
+      border: none;
+      border-radius: 7px;
+      font: 14px/1 -apple-system, sans-serif;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .fill-btn:disabled {
+      background: #1e3a4a;
+      color: #4b6272;
+      cursor: default;
+    }
+
+    .fill-btn:hover:not(:disabled) {
+      background: #0284c7;
+    }
+
+    #fill-status {
+      margin-top: 10px;
+      font-size: 12px;
+      min-height: 16px;
+    }
+
+    #fill-status.ok {
+      color: #34d399;
+    }
+
+    #fill-status.error {
+      color: #f87171;
+    }
+
+    #fill-status.info {
+      color: #64748b;
+    }
+
+    .section {
+      margin-bottom: 14px;
+    }
+
+    .section-title {
+      font-size: 11px;
+      font-weight: 600;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      margin-bottom: 8px;
+    }
+
+    label {
+      display: block;
+      font-size: 12px;
+      color: #94a3b8;
+      margin-bottom: 3px;
+    }
+
+    input[type=text],
+    input[type=password],
+    input[type=email],
+    textarea,
+    select {
+      width: 100%;
+      padding: 7px 9px;
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 5px;
+      color: #e2e8f0;
+      font: 13px -apple-system, sans-serif;
+      outline: none;
+    }
+
+    input:focus,
+    textarea:focus,
+    select:focus {
+      border-color: #38bdf8;
+    }
+
+    textarea {
+      resize: vertical;
+      min-height: 70px;
+    }
+
+    .row2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .save-row {
+      display: flex;
+      gap: 8px;
+      margin-top: 6px;
+    }
+
+    .save-btn {
+      flex: 1;
+      padding: 9px;
+      background: #0ea5e9;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font: 13px -apple-system, sans-serif;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .save-btn:hover {
+      background: #0284c7;
+    }
+
+    #save-status {
+      font-size: 12px;
+      align-self: center;
+    }
+
+    #save-status.ok {
+      color: #34d399;
+    }
+
+    #save-status.error {
+      color: #f87171;
+    }
+
+    .resume-name {
+      font-size: 11px;
+      color: #38bdf8;
+      margin-top: 4px;
+      word-break: break-all;
+    }
+
+    .resume-clear {
+      font-size: 11px;
+      color: #64748b;
+      cursor: pointer;
+      margin-left: 6px;
+    }
+
+    .resume-clear:hover {
+      color: #f87171;
+    }
+
+    input[type=file] {
+      width: 100%;
+      font-size: 12px;
+      color: #94a3b8;
+      cursor: pointer;
+    }
+
     input[type=file]::file-selector-button {
-      background: #1e293b; border: 1px solid #334155; color: #e2e8f0; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 12px; margin-right: 8px;
+      background: #1e293b;
+      border: 1px solid #334155;
+      color: #e2e8f0;
+      padding: 4px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 12px;
+      margin-right: 8px;
     }
-    .hint { font-size: 11px; color: #475569; margin-top: 3px; }
-    .key-row { display: flex; gap: 6px; }
-    .key-row input { flex: 1; }
-    .key-toggle { background: none; border: 1px solid #334155; border-radius: 5px; color: #64748b; padding: 0 9px; cursor: pointer; font-size: 11px; white-space: nowrap; }
-    .key-toggle:hover { color: #94a3b8; }
-    .badge { display: inline-block; font-size: 10px; padding: 1px 5px; border-radius: 10px; background: #14532d; color: #4ade80; margin-left: 4px; vertical-align: middle; }
-    .badge.warn { background: #7c2d12; color: #fb923c; }
+
+    .hint {
+      font-size: 11px;
+      color: #475569;
+      margin-top: 3px;
+    }
+
+    .key-row {
+      display: flex;
+      gap: 6px;
+    }
+
+    .key-row input {
+      flex: 1;
+    }
+
+    .key-toggle {
+      background: none;
+      border: 1px solid #334155;
+      border-radius: 5px;
+      color: #64748b;
+      padding: 0 9px;
+      cursor: pointer;
+      font-size: 11px;
+      white-space: nowrap;
+    }
+
+    .key-toggle:hover {
+      color: #94a3b8;
+    }
+
+    .badge {
+      display: inline-block;
+      font-size: 10px;
+      padding: 1px 5px;
+      border-radius: 10px;
+      background: #14532d;
+      color: #4ade80;
+      margin-left: 4px;
+      vertical-align: middle;
+    }
+
+    .badge.warn {
+      background: #7c2d12;
+      color: #fb923c;
+    }
   </style>
 </head>
+
 <body>
   <div class="tabs">
     <button class="tab active" data-tab="fill">Autofill</button>
@@ -61,7 +289,8 @@
 
   <div id="tab-fill" class="panel active">
     <div class="logo">JobMate <span id="config-badge" class="badge warn">No API key</span></div>
-    <p class="desc">Click Autofill to fill the job application on the current page using your saved profile and resume.</p>
+    <p class="desc">Click Autofill to fill the job application on the current page using your saved profile and resume.
+    </p>
     <button class="fill-btn" id="fill-btn">Autofill this page</button>
     <div id="fill-status" class="info"></div>
   </div>
@@ -96,17 +325,22 @@
 
     <div class="section">
       <div class="section-title">Profile context</div>
-      <textarea id="s-context" rows="5" placeholder="Name: Jane Smith&#10;Role: Frontend Engineer&#10;Location: Paris, France&#10;LinkedIn: linkedin.com/in/janesmith&#10;Skills: React, TypeScript, Node.js&#10;…"></textarea>
-      <p class="hint">This is sent to the LLM to fill form fields. Include your name, location, skills, work history, URLs, etc.</p>
+      <textarea id="s-context" rows="5"
+        placeholder="Name: Jane Smith&#10;Role: Frontend Engineer&#10;Location: Paris, France&#10;LinkedIn: linkedin.com/in/janesmith&#10;Skills: React, TypeScript, Node.js&#10;…"></textarea>
+      <p class="hint">This is sent to the LLM to fill form fields. Include your name, location, skills, work history,
+        URLs, etc.</p>
     </div>
 
     <div class="section">
-      <div class="section-title">Writing sample <span style="font-weight:400;text-transform:none;font-size:11px;color:#475569">(used for cover letter style)</span></div>
+      <div class="section-title">Writing sample <span
+          style="font-weight:400;text-transform:none;font-size:11px;color:#475569">(used for cover letter style)</span>
+      </div>
       <textarea id="s-sample" rows="4" placeholder="Paste a paragraph you wrote…"></textarea>
     </div>
 
     <div class="section">
-      <div class="section-title">Cover letter template <span style="font-weight:400;text-transform:none;font-size:11px;color:#475569">(optional)</span></div>
+      <div class="section-title">Cover letter template <span
+          style="font-weight:400;text-transform:none;font-size:11px;color:#475569">(optional)</span></div>
       <textarea id="s-cltemplate" rows="3" placeholder="Optional skeleton for the cover letter…"></textarea>
     </div>
 
@@ -124,4 +358,5 @@
 
   <script src="popup.js"></script>
 </body>
+
 </html>

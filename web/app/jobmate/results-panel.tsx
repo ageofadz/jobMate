@@ -72,10 +72,10 @@ function cardSummary(value: string): string {
   if (!oneLine) {
     return "";
   }
-  if (oneLine.length <= 400) {
+  if (oneLine.length <= 700) {
     return oneLine;
   }
-  return `${oneLine.slice(0, 399)}…`;
+  return `${oneLine.slice(0, 699)}…`;
 }
 
 export function ContactsModal(props: {
@@ -89,47 +89,47 @@ export function ContactsModal(props: {
   const { job, linkedinLinks, hiringContacts, busy, error, onClose } = props;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="max-h-[80vh] w-full max-w-lg overflow-auto rounded-xl border border-gray-200 bg-white p-5 shadow-xl dark:border-gray-700 dark:bg-gray-900">
+    <div className="jm-overlay fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="jm-panel max-h-[80vh] w-full max-w-lg overflow-auto p-5">
         <div className="flex items-start justify-between gap-3">
           <div>
             <h3 className="text-lg font-semibold">{job.company}</h3>
-            <p className="text-sm text-gray-600 dark:text-gray-400">{job.source_title}</p>
+            <p className="jm-muted text-sm">{job.source_title}</p>
           </div>
-          <button type="button" onClick={onClose} className="text-sm text-gray-500 hover:text-gray-800 dark:hover:text-gray-200">
+          <button type="button" onClick={onClose} className="jm-muted text-sm hover:opacity-80">
             Close
           </button>
         </div>
-        {busy ? <p className="mt-4 text-sm text-gray-500 dark:text-gray-400">Loading contacts…</p> : null}
+        {busy ? <p className="jm-muted mt-4 text-sm">Loading contacts…</p> : null}
         {error ? <p className="mt-4 text-sm text-red-600 dark:text-red-400">{error}</p> : null}
         <div className="mt-4 space-y-4">
           <div>
-            <p className="text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">LinkedIn</p>
+            <p className="jm-section-title text-xs">LinkedIn</p>
             <ul className="mt-2 space-y-1">
               {linkedinLinks.length ? (
                 linkedinLinks.map((link) => (
                   <li key={link}>
-                    <a href={link} target="_blank" rel="noreferrer" className="text-sm text-blue-700 underline dark:text-blue-400">
+                    <a href={link} target="_blank" rel="noreferrer" className="jm-link text-sm">
                       {link}
                     </a>
                   </li>
                 ))
               ) : (
-                <li className="text-sm text-gray-500 dark:text-gray-400">None found.</li>
+                <li className="jm-muted text-sm">None found.</li>
               )}
             </ul>
           </div>
           <div>
-            <p className="text-xs font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">Email</p>
+            <p className="jm-section-title text-xs">Email</p>
             <ul className="mt-2 space-y-1">
               {hiringContacts.length ? (
                 hiringContacts.map((email) => (
-                  <li key={email} className="text-sm text-gray-800 dark:text-gray-200">
+                  <li key={email} className="text-sm">
                     {email}
                   </li>
                 ))
               ) : (
-                <li className="text-sm text-gray-500 dark:text-gray-400">None found.</li>
+                <li className="jm-muted text-sm">None found.</li>
               )}
             </ul>
           </div>
@@ -152,11 +152,11 @@ export function JobResultCard(props: {
   const { job, selected, onToggleSelect, onApply, onViewListing, onMarkApplied, onArchive, onViewContacts } = props;
   const summary = cardSummary(job.summary);
   const logoSrc = companyLogoProxyPath(job.company_logo_url);
-  const btn =
-    "rounded border border-gray-300 px-2 py-1 text-xs font-medium text-gray-800 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-100 dark:hover:bg-gray-800";
 
   return (
-    <article className="relative box-border flex h-[300px] w-full min-w-0 max-w-[470px] overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm dark:border-gray-700 dark:bg-gray-900">
+    <article
+      className={`jm-card relative box-border flex h-[360px] w-full min-w-0 max-w-[470px] ${selected ? "jm-selected" : ""}`}
+    >
       <input
         type="checkbox"
         checked={selected}
@@ -166,40 +166,42 @@ export function JobResultCard(props: {
       <div className="flex min-w-0 flex-1 p-4 pl-10">
         <div className="flex min-w-0 flex-1 flex-col justify-between pr-3">
           <div className="min-w-0 space-y-1">
-            <h3 className="line-clamp-2 text-base font-semibold leading-snug text-gray-900 dark:text-gray-100">{job.source_title}</h3>
-            <p className="truncate text-sm font-medium text-gray-800 dark:text-gray-200">{job.company}</p>
-            <p className="truncate text-sm text-gray-600 dark:text-gray-400">{job.location.trim() || "Unknown location"}</p>
+            <h3 className="line-clamp-2 text-base font-semibold leading-snug">{job.source_title}</h3>
+            <p className="truncate text-sm font-medium">{job.company}</p>
+            <p className="jm-muted truncate text-sm">{job.location.trim() || "Unknown location"}</p>
             {summary ? (
-              <p className="line-clamp-6 text-xs leading-snug text-gray-500 dark:text-gray-400">{summary}</p>
+              <p className="jm-muted line-clamp-7 text-xs leading-snug">{summary}</p>
             ) : null}
           </div>
-          <div className="space-y-0.5 text-xs text-gray-500 dark:text-gray-400">
+          <div className="jm-muted space-y-0.5 text-xs">
             <p>Posted: {formatPostedDate(job.posted_at)}</p>
             <p>Retrieved: {formatRetrievedDate(job.discovered_at)}</p>
           </div>
         </div>
-        <div className="flex w-[128px] shrink-0 flex-col items-end justify-between">
-          <div className="flex h-20 w-20 items-center justify-center overflow-hidden rounded-lg border border-gray-200 bg-gray-50 dark:border-gray-700 dark:bg-gray-800">
+        <div className="flex w-[132px] shrink-0 flex-col items-stretch justify-between">
+          <div className="jm-card-logo flex h-20 w-full shrink-0 overflow-hidden">
             {logoSrc ? (
-              <img src={logoSrc} alt="" className="max-h-full max-w-full object-contain" />
+              <img src={logoSrc} alt="" className="h-full w-full object-contain" />
             ) : (
-              <span className="px-1 text-center text-[10px] uppercase tracking-wide text-gray-400">No logo</span>
+              <span className="jm-muted flex h-full w-full items-center justify-center text-[10px] uppercase tracking-wide">
+                No logo
+              </span>
             )}
           </div>
           <div className="flex w-full flex-col gap-1">
-            <button type="button" className={btn} onClick={onApply}>
+            <button type="button" className="jm-btn-primary w-full px-2 py-1 text-xs" onClick={onApply}>
               Apply
             </button>
-            <button type="button" className={btn} onClick={onViewListing}>
+            <button type="button" className="jm-btn-outline w-full px-2 py-1 text-xs normal-case" onClick={onViewListing}>
               View listing
             </button>
-            <button type="button" className={btn} onClick={onMarkApplied}>
+            <button type="button" className="jm-btn-outline w-full px-2 py-1 text-xs normal-case" onClick={onMarkApplied}>
               Mark applied
             </button>
-            <button type="button" className={btn} onClick={onArchive}>
+            <button type="button" className="jm-btn-ghost w-full px-2 py-1 text-xs normal-case" onClick={onArchive}>
               Archive
             </button>
-            <button type="button" className={btn} onClick={onViewContacts}>
+            <button type="button" className="jm-btn-ghost w-full px-2 py-1 text-xs normal-case" onClick={onViewContacts}>
               View contacts
             </button>
           </div>
@@ -297,16 +299,13 @@ export function ResultsPanel(props: {
     <div className="space-y-6">
       <div>
         <h2 className="text-xl font-semibold tracking-tight">Results</h2>
-        <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">Jobs in new or reviewed status.</p>
+        <p className="jm-muted mt-1 text-sm">Jobs in new or reviewed status.</p>
       </div>
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2 border-b pb-4" style={{ borderColor: "var(--color-border)" }}>
         <button
           type="button"
           onClick={() => onFilter("all")}
-          className={`rounded-full px-3 py-1 text-sm ${filter === "all"
-            ? "bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900"
-            : "border border-gray-300 dark:border-gray-700"
-            }`}
+          className={filter === "all" ? "jm-tab jm-tab-active" : "jm-tab"}
         >
           All
         </button>
@@ -315,10 +314,7 @@ export function ResultsPanel(props: {
             key={p.id}
             type="button"
             onClick={() => onFilter(p.id)}
-            className={`rounded-full px-3 py-1 text-sm ${filter === p.id
-              ? "bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-900"
-              : "border border-gray-300 dark:border-gray-700"
-              }`}
+            className={filter === p.id ? "jm-tab jm-tab-active" : "jm-tab"}
           >
             {p.title}
           </button>
@@ -326,32 +322,20 @@ export function ResultsPanel(props: {
       </div>
       {jobs.length > 0 ? (
         <div className="flex flex-wrap items-center gap-3">
-          <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
+          <label className="flex items-center gap-2 text-sm">
             <input type="checkbox" checked={allSelected} onChange={toggleAll} />
             Select all
           </label>
           {bulkBar ? (
             <>
-              <span className="text-sm text-gray-500 dark:text-gray-400">{selected.size} selected</span>
-              <button
-                type="button"
-                onClick={() => void runBulk("apply")}
-                className="rounded-lg bg-gray-900 px-3 py-1.5 text-sm font-medium text-white dark:bg-gray-100 dark:text-gray-900"
-              >
+              <span className="jm-muted text-sm">{selected.size} selected</span>
+              <button type="button" onClick={() => void runBulk("apply")} className="jm-btn-primary px-3 py-1.5 text-sm">
                 Mass apply
               </button>
-              <button
-                type="button"
-                onClick={() => void runBulk("mark")}
-                className="rounded-lg border border-gray-300 px-3 py-1.5 text-sm dark:border-gray-600"
-              >
+              <button type="button" onClick={() => void runBulk("mark")} className="jm-btn-ghost px-3 py-1.5 text-sm">
                 Mass mark applied
               </button>
-              <button
-                type="button"
-                onClick={() => void runBulk("archive")}
-                className="rounded-lg border border-gray-300 px-3 py-1.5 text-sm dark:border-gray-600"
-              >
+              <button type="button" onClick={() => void runBulk("archive")} className="jm-btn-ghost px-3 py-1.5 text-sm">
                 Mass archive
               </button>
             </>
@@ -359,7 +343,7 @@ export function ResultsPanel(props: {
         </div>
       ) : null}
       {jobs.length === 0 ? (
-        <p className="text-sm text-gray-500 dark:text-gray-400">No result jobs.</p>
+        <p className="jm-muted text-sm">No result jobs.</p>
       ) : (
         <div className="overflow-x-auto">
           <div className="grid w-max grid-cols-3 gap-4">

@@ -7,10 +7,14 @@
       chrome.runtime.sendMessage(message, (response) => {
         const last = chrome.runtime.lastError;
         if (last) {
-          reject(new Error(last.message || "Extension messaging failed"));
+          reject(new Error(last.message));
           return;
         }
-        resolve(response || {});
+        if (!response) {
+          reject(new Error(`Background returned no response for ${message?.type} — background script may not have a handler for this message type.`));
+          return;
+        }
+        resolve(response);
       });
     });
   }
@@ -20,13 +24,13 @@
     if (sessionId) {
       history.replaceState(null, document.title, location.pathname + location.search);
       const payloadUrl = `ext://session/${sessionId}`;
-      await extensionMessage({ type: "JOBMATE_APPLY_SESSION_SET", payloadUrl }).catch(() => {});
+      await extensionMessage({ type: "JOBMATE_APPLY_SESSION_SET", payloadUrl }).catch(() => { });
       return payloadUrl;
     }
     const fromHash = hash.get("jobmatePayload");
     if (fromHash) {
       history.replaceState(null, document.title, location.pathname + location.search);
-      await extensionMessage({ type: "JOBMATE_APPLY_SESSION_SET", payloadUrl: fromHash }).catch(() => {});
+      await extensionMessage({ type: "JOBMATE_APPLY_SESSION_SET", payloadUrl: fromHash }).catch(() => { });
       return fromHash;
     }
     for (let attempt = 0; attempt < 40; attempt++) {
@@ -54,7 +58,7 @@
         u.pathname = `${baseMatch[1]}/${segment}`;
         return u.toString();
       }
-    } catch {}
+    } catch { }
     return raw.replace(/\/payload\/?(\?.*)?$/i, `/${segment}$1`);
   }
 
@@ -85,7 +89,7 @@
       pattern.lastIndex = 0;
       const match = pattern.exec(chunk);
       if (match) {
-        try { return new URL(match[1].replace(/\\\//g, "/")).toString(); } catch {}
+        try { return new URL(match[1].replace(/\\\//g, "/")).toString(); } catch { }
       }
     }
     return null;
@@ -215,6 +219,10 @@
       await sleep(300);
     }
 
+    if (opensFileChooser(node)) {
+      return false;
+    }
+
     await aggressiveClick(node);
     return true;
   }
@@ -322,6 +330,7 @@
 
     for (const node of collectActionCandidates()) {
       if (!isActionRendered(node)) continue;
+      if (opensFileChooser(node)) continue;
       if (node.tagName === "A") {
         const hrefAttr = node.getAttribute("href") || "";
         if (hrefAttr.startsWith("javascript:") && !node.getAttribute("onclick") && node.getAttribute("role") !== "button") {
@@ -369,7 +378,14 @@
     return { elements, fieldItems };
   }
 
+  function clearActionOverlays() {
+    for (const node of document.querySelectorAll(".jobmate-action-overlay")) {
+      node.remove();
+    }
+  }
+
   async function callStep(step, history, hiddenApplyUrl, elements, blockedElementIds) {
+    clearActionOverlays();
     const reply = await extensionMessage({
       type: "JOBMATE_ANALYZE_PAGE",
       pageUrl: location.href,
@@ -378,10 +394,46 @@
       history,
       hiddenApplyUrl: hiddenApplyUrl || null,
       elements,
-      blockedElementIds: [...blockedElementIds]
+      blockedElementIds: [...blockedElementIds],
+      overlayMap: []
     });
     if (!reply?.ok) throw new Error(reply?.error || "Analyze failed.");
     return reply.action;
+  }
+
+  function collectValidationErrors() {
+    const texts = [];
+    for (const node of document.querySelectorAll('[aria-invalid="true"], [aria-describedby], .error, .field-error, .invalid, .has-error, [data-error]')) {
+      const t = (node.textContent || "").replace(/\s+/g, " ").trim();
+      if (t && t.length < 300) texts.push(t);
+    }
+    for (const node of document.querySelectorAll('[role="alert"], [role="status"]')) {
+      const t = (node.textContent || "").replace(/\s+/g, " ").trim();
+      if (t && t.length < 300) texts.push(t);
+    }
+    return [...new Set(texts)].slice(0, 20);
+  }
+
+  function fieldValueForValidation(item) {
+    const node = item.node;
+    if (!node) return "";
+    const tag = node.tagName?.toLowerCase();
+    if (tag === "select") {
+      const opt = node.selectedOptions?.[0];
+      return clean(opt?.label || opt?.text || opt?.value || node.value || "");
+    }
+    if (item.field.type === "radio" || item.field.type === "checkbox") {
+      const name = node.getAttribute("name");
+      const group = name
+        ? Array.from(document.querySelectorAll(`input[type="${item.field.type}"][name="${CSS.escape(name)}"]`))
+        : [node];
+      const checked = group.filter((input) => input.checked);
+      return checked.map((input) => labelledText(input) || input.value).filter(Boolean).join(", ");
+    }
+    if (item.field.type === "contenteditable") {
+      return clean(node.textContent || "");
+    }
+    return clean(node.value || "");
   }
 
   function fieldRoots() {
@@ -390,7 +442,7 @@
       try {
         const doc = iframe.contentDocument;
         if (doc) roots.push(doc);
-      } catch {}
+      } catch { }
     }
     return roots;
   }
@@ -495,8 +547,21 @@
       const rect = node.getBoundingClientRect();
       if (rect.width === 0 && rect.height === 0) return false;
       const style = window.getComputedStyle(node);
-      if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return false;
+      if (style.display === "none" || style.visibility === "hidden") return false;
+      if (node.getAttribute("aria-hidden") === "true") return false;
       return true;
+    }
+
+    function isCheckboxUsable(node) {
+      if (isRendered(node)) return true;
+      const id = node.id;
+      if (id) {
+        const label = document.querySelector(`label[for="${CSS.escape(id)}"]`);
+        if (label && isRendered(label)) return true;
+      }
+      const parentLabel = node.closest("label");
+      if (parentLabel && isRendered(parentLabel)) return true;
+      return false;
     }
 
     for (const root of fieldRoots()) {
@@ -505,7 +570,11 @@
         const type = tag === "input" ? String(node.type || "text").toLowerCase() : tag;
         if (["hidden", "button", "submit", "reset", "image", "search"].includes(type)) continue;
         if (node.closest('[role="search"], search')) continue;
-        if (type !== "file" && !isRendered(node)) continue;
+        if (type === "checkbox") {
+          if (!isCheckboxUsable(node)) continue;
+        } else if (type !== "file" && !isRendered(node)) {
+          continue;
+        }
         pushField(node, type, tag);
       }
     }
@@ -535,7 +604,6 @@
 
     if (!focusTarget) return;
 
-    focusTarget.scrollIntoView({ block: "center", inline: "center" });
     focusTarget.focus();
 
     const opts = { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true, view: window };
@@ -544,11 +612,64 @@
     focusTarget.dispatchEvent(new KeyboardEvent("keyup", opts));
 
     if (form && typeof form.requestSubmit === "function") {
-      try { form.requestSubmit(); } catch {}
+      try { form.requestSubmit(); } catch { }
     }
   }
 
+  function scopeForNode(node) {
+    const root = node.getRootNode();
+    return root instanceof Document || root instanceof ShadowRoot ? root : document;
+  }
+
+  function fileInputFromId(scope, id) {
+    if (!id) return null;
+    const linked = scope.querySelector(`#${CSS.escape(id)}`);
+    if (linked?.tagName === "INPUT" && String(linked.type || "").toLowerCase() === "file") {
+      return linked;
+    }
+    return null;
+  }
+
+  function associatedFileInput(node) {
+    if (!node || node.nodeType !== Node.ELEMENT_NODE) return null;
+    if (node.tagName === "INPUT" && String(node.type || "").toLowerCase() === "file") {
+      return node;
+    }
+    const scope = scopeForNode(node);
+    if (node.tagName === "LABEL") {
+      const byFor = fileInputFromId(scope, node.getAttribute("for"));
+      if (byFor) return byFor;
+      const nested = node.querySelector('input[type="file"]');
+      if (nested) return nested;
+    }
+    const labelWrap = node.closest("label");
+    if (labelWrap) {
+      const nested = labelWrap.querySelector('input[type="file"]');
+      if (nested) return nested;
+    }
+    const inTree = node.querySelector?.('input[type="file"]');
+    if (inTree) return inTree;
+    const asInput = node.closest?.('input[type="file"]');
+    if (asInput) return asInput;
+    const fieldGroup = node.closest(
+      "fieldset, label, li, tr, [class*='field'], [class*='Field'], [class*='upload'], [class*='Upload'], [class*='file'], [class*='File'], [class*='attachment'], [class*='Attachment'], [data-testid*='upload'], [data-testid*='file'], [data-testid*='resume'], [data-testid*='cv']"
+    );
+    if (fieldGroup) {
+      const nearby = fieldGroup.querySelector('input[type="file"]');
+      if (nearby) return nearby;
+    }
+    return null;
+  }
+
+  function opensFileChooser(node) {
+    return Boolean(associatedFileInput(node));
+  }
+
   async function aggressiveClick(node) {
+    if (opensFileChooser(node)) {
+      return;
+    }
+
     const savedAriaHidden = node.getAttribute("aria-hidden");
     const savedTabindex = node.getAttribute("tabindex");
     const savedDisabled = node.disabled;
@@ -559,7 +680,6 @@
     if (savedDisabled) node.disabled = false;
     if (savedAriaDisabled === "true") node.setAttribute("aria-disabled", "false");
 
-    node.scrollIntoView({ block: "center", inline: "center" });
     node.focus();
 
     const evOpts = { bubbles: true, cancelable: true, view: window };
@@ -642,21 +762,53 @@
     return !String(node.value ?? "").trim();
   }
 
-  function choose(node, answer, multi) {
+  function choiceClickTarget(input) {
+    const id = input.id;
+    if (id) {
+      const linked = document.querySelector(`label[for="${CSS.escape(id)}"]`);
+      if (linked) return linked;
+    }
+    const wrapped = input.closest("label");
+    if (wrapped) return wrapped;
+    const parent = input.parentElement;
+    if (parent) {
+      const siblingLabel = parent.querySelector("label, span, div");
+      if (siblingLabel && siblingLabel !== input && isRendered(siblingLabel)) return siblingLabel;
+    }
+    return input;
+  }
+
+  async function activateChoice(input, checked) {
+    const target = choiceClickTarget(input);
+    await aggressiveClick(target);
+    if (checked !== undefined) {
+      input.checked = checked;
+      if (input.getAttribute("role") === "checkbox" || input.getAttribute("role") === "radio") {
+        input.setAttribute("aria-checked", checked ? "true" : "false");
+      }
+    }
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  async function choose(node, answer, multi) {
     const name = node.getAttribute("name");
-    const group = name
+    const role = node.getAttribute("role");
+    const inputType = node.type || role || "checkbox";
+    const group = name && node.tagName === "INPUT"
       ? Array.from(document.querySelectorAll(`input[type="${node.type}"][name="${CSS.escape(name)}"]`))
-      : [node];
+      : role === "radio" || role === "checkbox"
+        ? [node]
+        : name
+          ? Array.from(document.querySelectorAll(`input[type="${inputType}"][name="${CSS.escape(name)}"]`))
+          : [node];
     const wanted = answer.split(/[\n,;|]/).map(norm).filter(Boolean);
     for (const item of group) {
       const label = labelledText(item);
       const match = optionMatches(wanted, label, item.value);
       if (match) {
         item.focus();
-        if (!item.checked) item.click();
-        item.checked = true;
-        item.dispatchEvent(new Event("input", { bubbles: true }));
-        item.dispatchEvent(new Event("change", { bubbles: true }));
+        if (!item.checked) await activateChoice(item, true);
         if (!multi) return;
       }
     }
@@ -684,10 +836,7 @@
       if (isDemographicField(item.field)) continue;
       if (item.node.checked) continue;
       item.node.focus();
-      await aggressiveClick(item.node);
-      item.node.checked = true;
-      item.node.dispatchEvent(new Event("input", { bubbles: true }));
-      item.node.dispatchEvent(new Event("change", { bubbles: true }));
+      await activateChoice(item.node, true);
     }
   }
 
@@ -777,37 +926,24 @@
     return items;
   }
 
-  function collectResumeInputs(fieldItems) {
-    const coverLetterIds = new Set(classifyCoverLetterFileFields(fieldItems));
-    const targets = [];
-
-    for (const input of collectAllFileInputs()) {
-      const item = fieldItems.find((entry) => entry.node === input);
-      if (item && coverLetterIds.has(item.field.fieldId)) continue;
-      if (isCoverLetterFileInput(input)) continue;
-
-      const label = item?.field.label || nearbyLabel(input);
-      if (isResumeLabel(label)) {
-        targets.push(input);
-        continue;
-      }
-
-      const accept = String(input.getAttribute("accept") || "").toLowerCase();
-      if (accept.includes("pdf") || accept.includes("doc") || accept.includes("msword") || accept.includes("word")) {
-        targets.push(input);
+  function resolveFileAttachmentIds(fieldItems, resumeFieldIds, coverLetterFieldIds) {
+    const fileIds = new Set(fieldItems.filter((item) => item.field.type === "file").map((item) => item.field.fieldId));
+    const resume = [...new Set(resumeFieldIds || [])].filter((id) => fileIds.has(id));
+    const cover = [...new Set(coverLetterFieldIds || [])].filter((id) => fileIds.has(id));
+    for (const id of resume) {
+      if (cover.includes(id)) {
+        throw new Error("The same file field was marked as both CV and cover letter.");
       }
     }
+    return { resumeFieldIds: resume, coverLetterFieldIds: cover };
+  }
 
-    if (!targets.length) {
-      for (const input of collectAllFileInputs()) {
-        const item = fieldItems.find((entry) => entry.node === input);
-        if (item && coverLetterIds.has(item.field.fieldId)) continue;
-        if (isCoverLetterFileInput(input)) continue;
-        targets.push(input);
-      }
-    }
-
-    return [...new Set(targets)];
+  function collectResumeInputs(fieldItems, resumeFieldIds) {
+    const resumeSet = new Set(resumeFieldIds || []);
+    if (!resumeSet.size) return [];
+    return fieldItems
+      .filter((item) => item.field.type === "file" && resumeSet.has(item.field.fieldId))
+      .map((item) => item.node);
   }
 
   function fileInputHasResume(input) {
@@ -837,8 +973,6 @@
   }
 
   async function forceAttachResumeToInput(input, file) {
-    input.scrollIntoView({ block: "center", inline: "center" });
-
     const saved = {
       type: input.type,
       hidden: input.hidden,
@@ -929,40 +1063,7 @@
       },
       async () => {
         prepareInput();
-        const zone = input.closest(
-          "label, [role='button'], button, [class*='upload'], [class*='drop'], [class*='file'], [class*='File']"
-        );
-        if (zone && zone !== input) {
-          await aggressiveClick(zone);
-          await sleep(150);
-        }
-        input.focus();
-        await assignFiles(input);
-      },
-      async () => {
-        prepareInput();
-        const id = input.getAttribute("id");
-        if (id) {
-          const root = input.getRootNode();
-          const scope = root instanceof Document ? root : root;
-          const label = scope.querySelector?.(`label[for="${CSS.escape(id)}"]`);
-          if (label) {
-            await aggressiveClick(label);
-            await sleep(150);
-          }
-        }
-        input.focus();
-        await assignFiles(input);
-      },
-      async () => {
-        prepareInput();
         await tryDrop(input);
-      },
-      async () => {
-        prepareInput();
-        await aggressiveClick(input);
-        await sleep(120);
-        await assignFiles(input);
       }
     ];
 
@@ -1121,68 +1222,43 @@
     return new File([text], "cover-letter.txt", { type: "text/plain" });
   }
 
-  async function waitForResumeAttached(input, payload, maxMs = 8000) {
-    const deadline = Date.now() + maxMs;
-    let stable = 0;
-    while (Date.now() < deadline) {
-      if (!fileInputHasResume(input) && !resumeUploadLooksComplete(input, payload)) {
-        stable = 0;
-        await sleep(250);
-        continue;
-      }
-      stable += 1;
-      if (stable >= 5) return true;
-      await sleep(300);
+  async function attachResumeOnce(fieldItems, payload, resumeFieldIds, coverLetterFieldIds) {
+    if (payload._resumeAttachDone) return;
+    if (!resumeFieldIds.length) {
+      payload._resumeAttachDone = true;
+      return;
     }
-    return fileInputHasResume(input) || resumeUploadLooksComplete(input, payload);
-  }
-
-  async function attachResumeFiles(resumeInputs, payload) {
-    const resume = payload.resumeUpload ? base64ToFile(payload.resumeUpload) : null;
-    if (!resume) return [];
-    const failedResume = [];
-
+    if (!payload.resumeUpload?.base64) return;
+    const resume = base64ToFile(payload.resumeUpload);
+    const coverSet = new Set(coverLetterFieldIds || []);
+    const resumeInputs = collectResumeInputs(fieldItems, resumeFieldIds).filter((input) => {
+      const item = fieldItems.find((entry) => entry.node === input);
+      const fieldId = item?.field.fieldId || "";
+      return fieldId && !coverSet.has(fieldId);
+    });
     for (const input of resumeInputs) {
       if (fileInputHasResume(input) || resumeUploadLooksComplete(input, payload)) continue;
-      const label = nearbyLabel(input) || input.getAttribute("name") || "resume";
       let ok = await forceAttachResumeToInput(input, resume);
       if (!ok) {
         await sleep(400);
-        ok = await forceAttachResumeToInput(input, resume);
-      }
-      if (!ok || !(await waitForResumeAttached(input, payload))) {
-        failedResume.push(label);
+        await forceAttachResumeToInput(input, resume);
       }
     }
-
-    if (failedResume.length) {
-      await requestHumanHelp(
-        `Resume PDF could not be attached to: ${failedResume.join(", ")}`,
-        "Please attach your resume/CV manually, then click Continue."
-      );
-    }
-
-    return failedResume;
+    payload._resumeAttachDone = true;
   }
 
-  async function attachAllResumeFiles(fieldItems, payload) {
-    if (!payload.resumeUpload?.base64) {
-      throw new Error("Application form requires a resume upload but no resume is on file.");
-    }
-    const resumeInputs = collectResumeInputs(fieldItems);
-    if (!resumeInputs.length) return [];
-    panel(["JobMate", `Attaching resume to ${resumeInputs.length} field(s)…`]);
-    return attachResumeFiles(resumeInputs, payload);
-  }
+  async function attachCoverLetterFiles(fieldItems, payload, coverLetterFieldIds, resumeFieldIds) {
+    if (!coverLetterFieldIds.length) return;
+    const coverFile = coverLetterUploadFile(payload);
+    if (!coverFile) return;
+    const coverSet = new Set(coverLetterFieldIds);
+    const resumeSet = new Set(resumeFieldIds || []);
 
-  async function attachCoverLetterFiles(fileInputs, payload, coverLetterFileIds, uploadCoverAsFile) {
-    const coverFile = uploadCoverAsFile ? coverLetterUploadFile(payload) : null;
-    const coverSet = new Set(coverLetterFileIds || []);
-
-    for (const input of fileInputs) {
-      const fieldId = input.dataset.jobmateFieldId || "";
-      if (!isCoverLetterFileInput(input)) continue;
-      if (!uploadCoverAsFile || !coverFile || !coverSet.has(fieldId)) continue;
+    for (const item of fieldItems) {
+      if (item.field.type !== "file") continue;
+      const fieldId = item.field.fieldId;
+      if (!coverSet.has(fieldId) || resumeSet.has(fieldId)) continue;
+      const input = item.node;
       const transfer = new DataTransfer();
       transfer.items.add(coverFile);
       setInputFiles(input, transfer.files);
@@ -1200,10 +1276,7 @@
     if (type === "checkbox" && !answer && !isDemographicField(item.field)) {
       if (!node.checked) {
         node.focus();
-        await aggressiveClick(node);
-        node.checked = true;
-        node.dispatchEvent(new Event("input", { bubbles: true }));
-        node.dispatchEvent(new Event("change", { bubbles: true }));
+        await activateChoice(node, true);
       }
       return;
     }
@@ -1219,7 +1292,7 @@
     }
 
     if (type === "radio" || type === "checkbox") {
-      choose(node, answer, type === "checkbox");
+      await choose(node, answer, type === "checkbox");
     } else if (tag === "select") {
       fillSelect(node, answer);
     } else if (fast) {
@@ -1243,7 +1316,29 @@
       }
       await fillControl(item, answer, true);
     }
-    await checkNonDemographicCheckboxes(fieldItems);
+  }
+
+  async function ensureRequiredChoicesFilled(fieldItems, answers) {
+    for (const item of fieldItems) {
+      if (item.field.type === "file") continue;
+      if (item.field.type === "checkbox") {
+        if (isDemographicField(item.field)) continue;
+        if (!item.node.checked) await activateChoice(item.node, true);
+        continue;
+      }
+      if (item.field.type === "radio") {
+        const answer = answers.get(item.field.fieldId) || "";
+        if (answer) await choose(item.node, answer, false);
+        else if (item.field.required && fieldLooksEmpty(item)) {
+          await activateChoice(item.node, true);
+        }
+        continue;
+      }
+      if (fieldLooksEmpty(item)) {
+        const answer = answers.get(item.field.fieldId) || "";
+        if (answer) await fillControl(item, answer, true);
+      }
+    }
   }
 
   function unresolvedFieldItems(fieldItems) {
@@ -1254,16 +1349,23 @@
     const emptyItems = unresolvedFieldItems(fieldItems);
     if (!emptyItems.length) return;
 
-    panel(["JobMate", `Retrying ${emptyItems.length} empty field(s)…`]);
+    const requiredEmpty = emptyItems.filter((item) => item.field.required);
+    const retryNote = requiredEmpty.length
+      ? `CRITICAL — ${requiredEmpty.length} REQUIRED FIELD(S) ARE STILL BLANK. This is a 5-alarm failure. You MUST provide a non-empty answer for every single field listed below. For dropdowns and radio groups, pick the best available option from the options list — returning free text or an empty string is absolutely forbidden. Required fields cannot be skipped under any circumstances. Fill location, visa sponsorship, work authorization, source/how-heard, and all dropdown/checkbox fields. Use every available piece of candidate context and the resume PDF. Required empty fields: ${requiredEmpty.map((i) => `"${i.field.label}" (type=${i.field.type}${i.field.options?.length ? `, options: ${i.field.options.slice(0, 6).join(" | ")}` : ""})`).join("; ")}`
+      : "These fields are still empty on the page. You MUST provide a non-empty answer for every field listed. Fill location, visa sponsorship, work authorization, source/how-heard, dropdowns, and checkbox consent fields. Use candidate context and the resume PDF.";
+
+    panel(["JobMate", `Retrying ${emptyItems.length} empty field(s)${requiredEmpty.length ? ` (${requiredEmpty.length} required)` : ""}…`]);
     const retryPayload = await extensionMessage({
       type: "JOBMATE_FILL_ANSWERS",
       fields: emptyItems.map((item) => item.field),
       pageLanguage,
-      retryNote:
-        "These fields are still empty on the page. You MUST provide a non-empty answer for every field listed. Fill location, visa sponsorship, work authorization, source/how-heard, dropdowns, and checkbox consent fields. Use candidate context and the resume PDF."
-    }).catch(() => null);
+      retryNote
+    }).catch((err) => ({ ok: false, error: err?.message ?? String(err) }));
 
-    if (!retryPayload?.ok) return new Map();
+    if (!retryPayload?.ok) {
+      panel(["JobMate — retry failed", String(retryPayload?.error ?? "").slice(0, 300)]);
+      return new Map();
+    }
 
     const retryAnswers = new Map((retryPayload.answers || []).map((item) => [item.fieldId, item.answer || ""]));
     for (const item of emptyItems) {
@@ -1274,64 +1376,31 @@
     return retryAnswers;
   }
 
-  function classifyResumeAttachmentFields(fieldItems, llmResumeFieldIds) {
-    const llmSet = new Set(llmResumeFieldIds || []);
-    const resumeElementIds = [];
-    for (const item of fieldItems) {
-      if (item.field.type !== "file") continue;
-      if (llmSet.has(item.field.fieldId)) {
-        resumeElementIds.push(item.field.fieldId);
-      }
-    }
-    return resumeElementIds;
-  }
-
   async function fillApplicationForm(payload) {
     let fieldItems = syncFileFieldItems(controls());
-    const resumeInputs = collectResumeInputs(fieldItems);
-    if (resumeInputs.length > 0) {
-      await attachAllResumeFiles(fieldItems, payload);
-    }
 
-    panel(["JobMate", "Opening cover letter text entry…"]);
-    const manualReveal = await revealCoverLetterManualEntry();
-    fieldItems = syncFileFieldItems(controls());
-    const coverLetterFileIds = classifyCoverLetterFileFields(fieldItems);
-    const uploadCoverAsFile =
-      coverLetterFileIds.length > 0 && (!manualReveal || !hasCoverLetterTextField(fieldItems));
-
-    const pendingResume = collectResumeInputs(fieldItems).filter(
-      (input) => !fileInputHasResume(input) && !resumeUploadLooksComplete(input, payload)
-    );
-    if (pendingResume.length > 0) {
-      await attachAllResumeFiles(fieldItems, payload);
-    }
-
-    panel(["JobMate", `Generating answers for ${fieldItems.length} fields…`]);
+    panel(["JobMate", "Generating answers…"]);
     const answersPayload = await extensionMessage({
       type: "JOBMATE_FILL_ANSWERS",
       fields: fieldItems.map((item) => item.field),
       pageLanguage: detectPageLanguage()
     });
-    if (!answersPayload?.ok) throw new Error(answersPayload?.error || "Answers generation failed.");
-
-    const llmResumeIds = classifyResumeAttachmentFields(fieldItems, answersPayload.resumeFieldIds || []);
-    const llmResumeInputs = fieldItems
-      .filter((item) => llmResumeIds.includes(item.field.fieldId))
-      .map((item) => item.node)
-      .filter((input) => input && !fileInputHasResume(input) && !resumeUploadLooksComplete(input, payload));
-    if (llmResumeInputs.length > 0) {
-      await attachResumeFiles(llmResumeInputs, payload);
+    if (!answersPayload?.ok) {
+      const reason = answersPayload?.error;
+      throw new Error(reason || `Gemini call for JOBMATE_FILL_ANSWERS returned ok=false with no error message — raw response: ${JSON.stringify(answersPayload)}`);
     }
 
-    const stillPending = collectResumeInputs(fieldItems).filter(
-      (input) => !fileInputHasResume(input) && !resumeUploadLooksComplete(input, payload)
+    const fileIds = resolveFileAttachmentIds(
+      fieldItems,
+      answersPayload.resumeFieldIds || [],
+      answersPayload.coverLetterFieldIds || []
     );
-    if (stillPending.length > 0) {
-      await attachAllResumeFiles(fieldItems, payload);
-    }
+    const resumeFieldIds = fileIds.resumeFieldIds;
+    let coverLetterFileIds = fileIds.coverLetterFieldIds;
+    payload.coverLetterText = answersPayload.coverLetterText || payload.coverLetterText || "";
 
     const answers = new Map((answersPayload.answers || []).map((item) => [item.fieldId, item.answer || ""]));
+    lastFormFill = { fieldItems: fieldItems.slice(), answers, url: location.href };
 
     for (const item of fieldItems) {
       const current = answers.get(item.field.fieldId) || "";
@@ -1341,39 +1410,44 @@
       }
     }
 
-    payload.coverLetterText = answersPayload.coverLetterText || payload.coverLetterText || "";
-
-    const resumeBeforeFill = collectResumeInputs(fieldItems).filter(
-      (input) => !fileInputHasResume(input) && !resumeUploadLooksComplete(input, payload)
-    );
-    if (resumeBeforeFill.length > 0) {
-      await attachAllResumeFiles(fieldItems, payload);
-    }
-
-    panel(["JobMate", `Filling ${fieldItems.length} fields…`]);
+    panel(["JobMate", "Filling form…"]);
+    await attachResumeOnce(fieldItems, payload, resumeFieldIds, coverLetterFileIds);
     await fillApplicationFieldItems(fieldItems, answers, payload);
+    await ensureRequiredChoicesFilled(fieldItems, answers);
 
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const emptyItems = unresolvedFieldItems(fieldItems);
-      if (!emptyItems.length) break;
-      const retryAnswers = await retryEmptyApplicationFields(fieldItems, payload, detectPageLanguage());
-      for (const [fieldId, answer] of retryAnswers.entries()) {
-        if (answer) answers.set(fieldId, answer);
+    const needsCoverLetterReview =
+      coverLetterFileIds.length > 0 || hasCoverLetterTextField(fieldItems);
+
+    if (needsCoverLetterReview) {
+      panel(["JobMate", "Review cover letter in the other tab, then Save or Reject."]);
+      const review = await extensionMessage({
+        type: "JOBMATE_COVER_LETTER_REVIEW",
+        draft: payload.coverLetterText || "",
+        pageLanguage: detectPageLanguage()
+      });
+      if (review?.action === "reject") {
+        coverLetterFileIds = [];
+        payload.coverLetterText = "";
+      } else if (review?.action === "save") {
+        payload.coverLetterText = String(review.text || "").trim();
+        if (payload.coverLetterText) {
+          for (const item of fieldItems) {
+            if (isCoverLetterTextField(item)) {
+              await fillControl(item, payload.coverLetterText, true);
+            }
+          }
+        } else {
+          coverLetterFileIds = [];
+        }
+      } else {
+        coverLetterFileIds = [];
       }
     }
 
-    await checkNonDemographicCheckboxes(fieldItems);
-
-    if (unresolvedFieldItems(fieldItems).length > 0) {
-      await retryEmptyApplicationFields(fieldItems, payload, detectPageLanguage());
-      await checkNonDemographicCheckboxes(fieldItems);
+    fieldItems = syncFileFieldItems(fieldItems);
+    if (coverLetterFileIds.length > 0 && payload.coverLetterText) {
+      await attachCoverLetterFiles(fieldItems, payload, coverLetterFileIds, resumeFieldIds);
     }
-
-    if (!payload.coverLetterText?.trim() && (coverLetterFileIds.length > 0 || hasCoverLetterTextField(fieldItems))) {
-      throw new Error("Application form requires a cover letter but none was generated.");
-    }
-
-    await attachCoverLetterFiles(collectAllFileInputs(), payload, coverLetterFileIds, uploadCoverAsFile);
   }
 
   async function fillAuthForm(payload, fieldItems, elements) {
@@ -1463,7 +1537,7 @@
       instruction: "Review the answers in this tab, then click Confirm.",
       applyUrl: location.href,
       kind: "confirm"
-    }).catch(() => {});
+    }).catch(() => { });
 
     panel(["JobMate: application form filled", "Review the form, then confirm below."]);
 
@@ -1504,7 +1578,7 @@
         confirmBtn.disabled = true;
         confirmBtn.textContent = "Working…";
         cleanupPickMode();
-        await extensionMessage({ type: "JOBMATE_SESSION_COMPLETE", applicationUrl: location.href }).catch(() => {});
+        await extensionMessage({ type: "JOBMATE_SESSION_COMPLETE", applicationUrl: location.href }).catch(() => { });
         wrap.remove();
         panel(["JobMate: confirmed ✓", "Submit the application when ready."]);
         resolve();
@@ -1614,7 +1688,7 @@
       message: whatHappened,
       instruction,
       applyUrl: location.href
-    }).catch(() => {});
+    }).catch(() => { });
 
     const result = await showActionPanel({
       id: "jobmate-help-wrap",
@@ -1630,12 +1704,12 @@
             type: "JOBMATE_APPLY_HUMAN_INSTRUCTION",
             instruction: userInstruction,
             applyUrl: location.href
-          }).catch(() => {});
+          }).catch(() => { });
         }
       }
     });
     resetUrlPingPongTrack();
-    await extensionMessage({ type: "JOBMATE_RESET_URL_OSCILLATION" }).catch(() => {});
+    await extensionMessage({ type: "JOBMATE_RESET_URL_OSCILLATION" }).catch(() => { });
     return typeof result === "string" ? result : "";
   }
 
@@ -1644,10 +1718,34 @@
     if (!box) {
       box = document.createElement("div");
       box.id = "jobmate-status";
-      box.style.cssText = "position:fixed;right:16px;bottom:16px;z-index:2147483647;background:#111827;color:white;padding:12px 14px;border-radius:8px;max-width:400px;font:13px/1.5 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;box-shadow:0 12px 30px rgba(0,0,0,.25);white-space:pre-wrap";
+      box.style.cssText =
+        "position:fixed;right:16px;bottom:16px;z-index:2147483647;background:#111827;color:white;padding:12px 14px;border-radius:8px;max-width:400px;font:13px/1.5 -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;box-shadow:0 12px 30px rgba(0,0,0,.25);display:flex;flex-direction:column;gap:8px";
+
+      const textEl = document.createElement("div");
+      textEl.className = "jobmate-status-text";
+      textEl.style.whiteSpace = "pre-wrap";
+      box.appendChild(textEl);
+
+      const interruptBtn = document.createElement("button");
+      interruptBtn.type = "button";
+      interruptBtn.textContent = "Interrupt";
+      interruptBtn.style.cssText =
+        "background:transparent;color:#fcd34d;border:1px solid #b45309;padding:8px 12px;border-radius:6px;font:13px -apple-system,sans-serif;cursor:pointer;width:100%";
+      interruptBtn.onclick = () => {
+        forcedInterrupt = {
+          reason: "Interrupted by user.",
+          instruction: "Complete the action needed to unblock this application, then click Continue."
+        };
+      };
+      box.appendChild(interruptBtn);
+
       document.body.appendChild(box);
     }
-    box.textContent = Array.isArray(lines) ? lines.filter(Boolean).join("\n") : lines;
+    const textEl = box.querySelector(".jobmate-status-text");
+    const text = Array.isArray(lines) ? lines.filter(Boolean).join("\n") : String(lines ?? "");
+    if (textEl) {
+      textEl.textContent = text;
+    }
   }
 
   function fetchViaExtension(url, init = {}, attempt = 0) {
@@ -1787,6 +1885,7 @@
     const MAX_STEPS = 20;
     const STUCK_THRESHOLD = 3;
     let lastReason = "";
+    let lastFormFill = null;
 
     async function checkStuck(stateBefore, instruction, taskKey) {
       await sleep(400);
@@ -1850,15 +1949,27 @@
             );
             continue;
           }
-        } catch {}
+        } catch { }
       }
 
       let hiddenApplyUrl = extractHiddenApplyUrl();
       let { elements, fieldItems } = collectPageElements(hiddenApplyUrl);
-      window.scrollTo(0, document.body.scrollHeight);
-      await sleep(350);
-      window.scrollTo(0, 0);
-      await sleep(200);
+      if (!fieldItems.length) {
+        const dialogSelector = '[role="dialog"], [role="alertdialog"], dialog, .modal, [class*="modal"], [class*="dialog"], [aria-modal="true"]';
+        const hasOpenDialog = !!document.querySelector(dialogSelector);
+        if (hasOpenDialog) {
+          for (let w = 0; w < 8; w++) {
+            await sleep(300);
+            const check = collectPageElements(hiddenApplyUrl);
+            if (check.fieldItems.length) {
+              elements = check.elements;
+              fieldItems = check.fieldItems;
+              break;
+            }
+          }
+        }
+      }
+
       const rescanned = collectPageElements(hiddenApplyUrl);
       if (rescanned.elements.length > elements.length) {
         elements = rescanned.elements;
@@ -1874,7 +1985,6 @@
           }
           handledForms.add(formKey);
           failuresByState.delete(stateBefore);
-          panel(["JobMate", `Application form — ${fieldItems.length} fields`, "Generating answers…"]);
           await fillApplicationForm(payload);
           history.push({ step, tool: "form_fill", reasoning: `filled ${fieldItems.length} fields` });
           continue;
@@ -1949,7 +2059,7 @@
           continue;
         }
         statusPanel(step, MAX_STEPS, action);
-        await rememberPlaybookStep(pageUrlBefore, fieldCountBefore, action, elements).catch(() => {});
+        await rememberPlaybookStep(pageUrlBefore, fieldCountBefore, action, elements).catch(() => { });
         if (navigateNow(action.url)) return;
         history.push({ ...histEntry, reasoning: "already on target page" });
         await checkStuck(
@@ -1972,16 +2082,106 @@
       if (action.tool === "click" && action.elementId) {
         const ok = await activateElement(payloadUrl, action.elementId, elements, { step, maxSteps: MAX_STEPS, action });
         if (ok === "navigated") {
-          await rememberPlaybookStep(pageUrlBefore, fieldCountBefore, action, elements).catch(() => {});
+          await rememberPlaybookStep(pageUrlBefore, fieldCountBefore, action, elements).catch(() => { });
+          lastFormFill = null;
           return;
         }
         history.push(histEntry);
         if (ok) {
           failuresByState.delete(stateBefore);
-          await rememberPlaybookIfAdvanced(stateBefore, pageUrlBefore, fieldCountBefore, action, elements).catch(() => {});
+          await rememberPlaybookIfAdvanced(stateBefore, pageUrlBefore, fieldCountBefore, action, elements).catch(() => { });
         } else {
           blockedElementIds.add(action.elementId);
         }
+
+        await sleep(600);
+        const { fieldItems: fieldsAfterClick } = collectPageElements(null);
+        const stateAfterClick = pageStateKey(fieldsAfterClick.length);
+        const pageStuck = stateAfterClick === stateBefore;
+
+        if (pageStuck && lastFormFill && lastFormFill.url === pageUrlBefore) {
+          const fill = lastFormFill;
+          lastFormFill = null;
+
+          const validationErrors = collectValidationErrors();
+          const fieldStates = fill.fieldItems
+            .filter((item) => item.field.type !== "file")
+            .map((item) => ({
+              fieldId: item.field.fieldId,
+              label: item.field.label,
+              type: item.field.type,
+              required: item.field.required,
+              options: item.field.options,
+              value: fieldValueForValidation(item)
+            }));
+
+          panel(["JobMate", "Validating form step…"]);
+
+          const validateResult = await extensionMessage({
+            type: "JOBMATE_VALIDATE_ADVANCE",
+            goal: "Advance past the current application form step after clicking Continue or Next",
+            pageUrl: location.href,
+            validationErrors,
+            fields: fieldStates
+          }).catch(() => null);
+
+          if (validateResult?.ok && validateResult.advanced) {
+            failuresByState.delete(stateBefore);
+            continue;
+          }
+
+          if (validateResult?.ok && validateResult.corrections?.length) {
+            for (const item of fill.fieldItems) {
+              const corr = validateResult.corrections.find((entry) => entry.fieldId === item.field.fieldId);
+              if (corr?.answer) {
+                await fillControl(item, corr.answer, true);
+                fill.answers.set(item.field.fieldId, corr.answer);
+              }
+            }
+            lastFormFill = fill;
+            if (action.elementId) {
+              const retryOk = await activateElement(payloadUrl, action.elementId, elements, { step, maxSteps: MAX_STEPS, action });
+              if (retryOk === "navigated") return;
+            }
+            continue;
+          }
+
+          const placementReport = fill.fieldItems
+            .filter((item) => item.field.type !== "file")
+            .map((item) => ({
+              fieldId: item.field.fieldId,
+              label: item.field.label,
+              type: item.field.type,
+              required: item.field.required,
+              options: item.field.options,
+              answer: fill.answers.get(item.field.fieldId) || ""
+            }));
+
+          panel(["JobMate", "Form failed — retrieving from AI…"]);
+
+          const explainResult = await extensionMessage({
+            type: "JOBMATE_EXPLAIN_PLACEMENTS",
+            placements: placementReport,
+            validationErrors
+          }).catch(() => null);
+
+          if (explainResult?.ok && Array.isArray(explainResult.explanations)) {
+            const lines = explainResult.explanations.map((e) =>
+              `Field: "${e.label}" (${e.type})\nPlaced: ${JSON.stringify(e.answer)}\nReason: ${e.reasoning}\nCorrection: ${JSON.stringify(e.correctedAnswer)}`
+            );
+            panel(["JobMate — AI Placement Audit", ...lines.slice(0, 6)]);
+            await sleep(1200);
+
+            for (const item of fill.fieldItems) {
+              const exp = explainResult.explanations.find((e) => e.fieldId === item.field.fieldId);
+              if (exp?.correctedAnswer && exp.correctedAnswer !== exp.answer) {
+                await fillControl(item, exp.correctedAnswer, true);
+                fill.answers.set(item.field.fieldId, exp.correctedAnswer);
+              }
+            }
+          }
+        }
+
         await checkStuck(
           stateBefore,
           "Please click the required button manually, then click Continue.",
@@ -2010,12 +2210,18 @@
       return true;
     }
     if (msg?.type === "JOBMATE_START_APPLY") {
-      run().catch((err) => panel(`JobMate error: ${err?.message ?? String(err)}`));
+      run().catch((err) => {
+        const m = err?.message ?? String(err);
+        panel(["JobMate error", m.slice(0, 400)]);
+      });
       sendResponse({ ok: true });
       return true;
     }
     return;
   });
 
-  run().catch((err) => panel(`JobMate error: ${err?.message ?? String(err)}`));
+  run().catch((err) => {
+    const m = err?.message ?? String(err);
+    panel(["JobMate error", m.slice(0, 400)]);
+  });
 })();

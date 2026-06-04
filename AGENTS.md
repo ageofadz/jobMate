@@ -1,0 +1,1 @@
+No regex, ever. Use LLMs to determine what a field is. Not every site is going to be in english so stuff is spelled differently. In fact, there are many other languages besides just English and French.
