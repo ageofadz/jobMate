@@ -48,17 +48,17 @@ html[data-theme="light"] {
 
 @theme {
   --font-sans: "PT Serif", ui-serif, Georgia, serif;
-  --color-white: var(--color-card);
+  --color-white: #ffffff;
   --color-gray-50: var(--color-bg-side);
-  --color-gray-100: var(--color-bg-head);
+  --color-gray-100: #e6eaf4;
   --color-gray-200: var(--color-border);
   --color-gray-300: var(--color-border);
-  --color-gray-400: var(--color-text-secondary);
-  --color-gray-500: var(--color-text-secondary);
-  --color-gray-600: var(--color-text-secondary);
-  --color-gray-700: var(--color-text-primary);
-  --color-gray-800: var(--color-card-media);
-  --color-gray-900: var(--color-card);
+  --color-gray-400: #6b6b78;
+  --color-gray-500: #5a5b68;
+  --color-gray-600: #5a5b68;
+  --color-gray-700: #2f3038;
+  --color-gray-800: #2f3038;
+  --color-gray-900: #1a1a1a;
   --color-gray-950: var(--color-bg-main);
 }
 
@@ -195,6 +195,7 @@ html[data-theme="dark"] .jm-tab-active {
 
 .jm-card {
   background-color: var(--color-card);
+  color: var(--color-text-primary);
   border-radius: 8px;
   overflow: hidden;
   display: flex;
@@ -288,6 +289,7 @@ html[data-theme="dark"] .jm-theme-toggle {
 
 .jm-panel {
   background-color: var(--color-card);
+  color: var(--color-text-primary);
   border: 1px solid var(--color-border);
   border-radius: 8px;
   box-shadow: 0 12px 30px rgba(0, 0, 0, 0.25);
@@ -390,7 +392,12 @@ html[data-theme="light"] .jm-targets-chevron {
   border: 2px solid var(--color-border);
   border-radius: 8px;
   background-color: var(--color-card);
+  color: var(--color-text-primary);
   padding: 0.75rem;
+}
+
+html[data-theme="light"] .bg-white {
+  color: #1a1a1a;
 }
 
 html[data-theme="dark"] .text-gray-100,
