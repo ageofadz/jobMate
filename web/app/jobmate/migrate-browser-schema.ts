@@ -62,6 +62,19 @@ export function migrateBrowserApplicationSchema(db: SqlJsDatabase) {
   ensureColumn(db, "jobs", "posted_at", "posted_at TEXT");
   ensureColumn(db, "jobs", "company_logo_url", "company_logo_url TEXT");
 
+  db.run(`CREATE TABLE IF NOT EXISTS unparsed_jobs (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    preference_id TEXT NOT NULL,
+    source_url TEXT NOT NULL,
+    source_host TEXT NOT NULL,
+    retrieved_at TEXT NOT NULL,
+    last_error TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    UNIQUE(user_id, source_url)
+  )`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_unparsed_jobs_user_pref ON unparsed_jobs(user_id, preference_id, retrieved_at)`);
+
   if (!kvHas(db, "jobmate_resume_profile_backfill")) {
     db.run(`UPDATE users SET resume_asset_id = (
       SELECT p.resume_asset_id FROM preferences p

@@ -573,6 +573,10 @@ export function JobmateApp() {
         perTargetLimit,
         preferenceIds: Array.from(prefIds),
         onProgress: (ev) => {
+          if (ev.kind === "inserted" || ev.kind === "refreshed") {
+            bumpData();
+            return;
+          }
           if (ev.kind === "phase") {
             ingestPhaseRef.current = {
               step: ev.step,
@@ -1513,12 +1517,7 @@ function HomePanel(props: {
           <div className="jm-targets-panel-inner">
             <div className="jm-targets-container">
               <div className="flex gap-3 overflow-x-auto pb-1">
-            {prefs.length === 0 ? (
-              <div className="jm-muted w-full px-4 py-6 text-center text-sm">
-                No targets yet. Add one to get started.
-              </div>
-            ) : (
-              prefs.map((p) => (
+            {prefs.map((p) => (
                 <div
                   key={p.id}
                   onClick={() => onToggleTarget(p.id)}
@@ -1566,8 +1565,15 @@ function HomePanel(props: {
                     </button>
                   </div>
                 </div>
-              ))
-            )}
+              ))}
+            <button
+              type="button"
+              onClick={onAdd}
+              className="jm-target-add-card flex h-full w-64 shrink-0 flex-col items-center justify-center"
+              aria-label="New target"
+            >
+              <span className="text-4xl leading-none text-gray-400 dark:text-gray-500">+</span>
+            </button>
               </div>
             </div>
           </div>
@@ -1624,13 +1630,6 @@ function HomePanel(props: {
               className={`text-xs ${bucketFilter === "archived" ? "jm-tab jm-tab-active" : "jm-tab"}`}
             >
               Archived Jobs
-            </button>
-            <button
-              type="button"
-              onClick={onAdd}
-              className="jm-btn-ghost text-xs"
-            >
-              New target
             </button>
             {confirmClearHistory ? (
               <>

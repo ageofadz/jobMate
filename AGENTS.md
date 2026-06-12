@@ -1,1 +1,4 @@
 No regex, ever. Use LLMs to determine what a field is. Not every site is going to be in english so stuff is spelled differently. In fact, there are many other languages besides just English and French.
+Do not ever, ever, ever specify strings and perform substring searches. This is tantamount to using regex.
+Do not put special little instructions in describing special buttons or fields that exist on specific sites, in a specific language. We do not want to track every possible button and field on every website and create speical little instructions for it in every prompt.
+The url to use is localhost:5173. Its important to use 'localhost' due to the fact that the data we test with is attached to that exat url.

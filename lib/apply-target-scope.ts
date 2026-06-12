@@ -1,4 +1,4 @@
-function trimTrailingSlashes(path) {
+function trimTrailingSlashes(path: string): string {
   let p = String(path || "");
   while (p.length > 1 && p.charAt(p.length - 1) === "/") {
     p = p.slice(0, -1);
@@ -6,17 +6,17 @@ function trimTrailingSlashes(path) {
   return p || "/";
 }
 
-function isDigitChar(ch) {
+function isDigitChar(ch: string): boolean {
   const code = ch.charCodeAt(0);
   return code >= 48 && code <= 57;
 }
 
-function isHexChar(ch) {
+function isHexChar(ch: string): boolean {
   const code = ch.charCodeAt(0);
   return (code >= 48 && code <= 57) || (code >= 97 && code <= 102) || (code >= 65 && code <= 70);
 }
 
-function isDigitRun(value, minLen) {
+function isDigitRun(value: string, minLen: number): boolean {
   const s = String(value || "");
   if (s.length < minLen) return false;
   for (let i = 0; i < s.length; i++) {
@@ -25,7 +25,7 @@ function isDigitRun(value, minLen) {
   return true;
 }
 
-function extractLongestDigitRun(value, minLen) {
+function extractLongestDigitRun(value: string, minLen: number): string {
   const s = String(value || "");
   let best = "";
   let run = "";
@@ -44,7 +44,7 @@ function extractLongestDigitRun(value, minLen) {
   return best;
 }
 
-function isUuidToken(token) {
+function isUuidToken(token: string): boolean {
   const parts = String(token || "").split("-");
   if (parts.length !== 5) return false;
   const lens = [8, 4, 4, 4, 12];
@@ -57,19 +57,19 @@ function isUuidToken(token) {
   return true;
 }
 
-function normalizeApplyScopeUrl(url, baseUrl) {
+export function normalizeApplyScopeUrl(url: string, baseUrl?: string): string {
   try {
     const parsed = new URL(url, baseUrl || undefined);
     parsed.hash = "";
     const path = trimTrailingSlashes(parsed.pathname);
     return `${parsed.origin}${path}${parsed.search}`;
   } catch {
-    return String(url || "").trim();
+    return url.trim();
   }
 }
 
-function extractJobUrlIdentifiers(url, baseUrl) {
-  const ids = new Set();
+export function extractJobUrlIdentifiers(url: string, baseUrl?: string): Set<string> {
+  const ids = new Set<string>();
   try {
     const parsed = new URL(url, baseUrl || undefined);
     const segments = parsed.pathname.split("/");
@@ -89,11 +89,12 @@ function extractJobUrlIdentifiers(url, baseUrl) {
       if (run) ids.add(run);
       if (isUuidToken(value)) ids.add(value.toLowerCase());
     }
-  } catch { }
+  } catch {
+  }
   return ids;
 }
 
-function htmlStemParentPrefix(path) {
+function htmlStemParentPrefix(path: string): string | null {
   const trimmed = trimTrailingSlashes(path);
   const slash = trimmed.lastIndexOf("/");
   const leaf = slash >= 0 ? trimmed.slice(slash + 1) : trimmed;
@@ -103,7 +104,7 @@ function htmlStemParentPrefix(path) {
   return trimmed.slice(0, trimmed.length - (leaf.length - dot)) + "/";
 }
 
-function pathPrefixRelationship(pathA, pathB) {
+function pathPrefixRelationship(pathA: string, pathB: string): boolean {
   const a = trimTrailingSlashes(pathA);
   const b = trimTrailingSlashes(pathB);
   if (a === b) return true;
@@ -118,7 +119,7 @@ function pathPrefixRelationship(pathA, pathB) {
   return false;
 }
 
-function resolveActionUrl(href, pageUrl) {
+function resolveActionUrl(href: string, pageUrl: string): string {
   try {
     return new URL(href, pageUrl).toString();
   } catch {
@@ -126,39 +127,37 @@ function resolveActionUrl(href, pageUrl) {
   }
 }
 
-function listingStemPrefixes(applyAnchorUrls, pageUrl) {
-  const stems = new Set();
+function listingStemPrefixes(applyAnchorUrls: string[], pageUrl: string): Set<string> {
+  const stems = new Set<string>();
   for (const raw of applyAnchorUrls) {
     if (!raw) continue;
     try {
       const path = trimTrailingSlashes(new URL(raw, pageUrl).pathname);
       const stem = htmlStemParentPrefix(path);
       if (stem) stems.add(stem);
-    } catch { }
+    } catch {
+    }
   }
   return stems;
 }
 
-function isStemChildApplyPath(resolvedUrl, applyAnchorUrls, pageUrl) {
+export function isStemChildApplyPath(resolvedUrl: string, applyAnchorUrls: string[], pageUrl: string): boolean {
   if (!resolvedUrl) return false;
   try {
     const path = trimTrailingSlashes(new URL(resolvedUrl, pageUrl).pathname);
     for (const stem of listingStemPrefixes(applyAnchorUrls, pageUrl)) {
       if (path.startsWith(stem) && path.length > stem.length) return true;
     }
-  } catch { }
+  } catch {
+  }
   return false;
 }
 
-function resolveStemChildActionUrl(action, applyAnchorUrls, pageUrl) {
-  const href = action?.href || action?.url || "";
-  if (!href) return "";
-  const resolved = resolveActionUrl(href, pageUrl);
-  if (!resolved || !isStemChildApplyPath(resolved, applyAnchorUrls, pageUrl)) return "";
-  return resolved;
-}
-
-function actionScopeTier(action, applyAnchorUrls, pageUrl) {
+function actionScopeTier(
+  action: { href?: string | null; url?: string | null },
+  applyAnchorUrls: string[],
+  pageUrl: string
+): number {
   const href = action.href || action.url || "";
   if (!href) return 3;
   const resolved = resolveActionUrl(href, pageUrl);
@@ -170,18 +169,29 @@ function actionScopeTier(action, applyAnchorUrls, pageUrl) {
   return 2;
 }
 
-function prioritizeA11yActions(actions, applyAnchorUrls, pageUrl) {
-  return [...actions].sort((a, b) => actionScopeTier(a, applyAnchorUrls, pageUrl) - actionScopeTier(b, applyAnchorUrls, pageUrl));
+export function prioritizeA11yActions<T extends { href?: string | null; url?: string | null }>(
+  actions: T[],
+  applyAnchorUrls: string[],
+  pageUrl: string
+): T[] {
+  return [...actions].sort(
+    (a, b) => actionScopeTier(a, applyAnchorUrls, pageUrl) - actionScopeTier(b, applyAnchorUrls, pageUrl)
+  );
 }
 
-function prioritizeActionsForClassifier(actions, applyAnchorUrls, pageUrl, maxCount) {
-  const tiers = [[], [], [], []];
+export function prioritizeActionsForClassifier<T extends { href?: string | null; url?: string | null }>(
+  actions: T[],
+  applyAnchorUrls: string[],
+  pageUrl: string,
+  maxCount: number
+): T[] {
+  const tiers: T[][] = [[], [], [], []];
   for (const action of actions) {
     const tierIndex = actionScopeTier(action, applyAnchorUrls, pageUrl) - 1;
     if (tierIndex >= 0 && tierIndex < 4) tiers[tierIndex].push(action);
     else tiers[3].push(action);
   }
-  const out = [];
+  const out: T[] = [];
   for (const tier of tiers) {
     for (const action of tier) {
       if (out.length >= maxCount) return out;
@@ -191,9 +201,14 @@ function prioritizeActionsForClassifier(actions, applyAnchorUrls, pageUrl, maxCo
   return out;
 }
 
-function rankScopedApplyAdvancingActions(actions, applyAnchorUrls, pageUrl, guardFail) {
+export function rankScopedApplyAdvancingActions(
+  actions: Array<{ elementId: string; href?: string | null; url?: string | null }>,
+  applyAnchorUrls: string[],
+  pageUrl: string,
+  guardFail: (action: { elementId: string; href?: string | null; url?: string | null }) => boolean
+): string[] {
   const pageNorm = normalizeApplyScopeUrl(pageUrl, pageUrl);
-  const candidates = [];
+  const candidates: Array<{ elementId: string; pathLen: number }> = [];
   for (const action of actions) {
     if (guardFail(action)) continue;
     const href = action.href || action.url || "";
@@ -206,29 +221,31 @@ function rankScopedApplyAdvancingActions(actions, applyAnchorUrls, pageUrl, guar
     let pathLen = 0;
     try {
       pathLen = trimTrailingSlashes(new URL(resolved, pageUrl).pathname).length;
-    } catch { }
+    } catch {
+    }
     candidates.push({ elementId: action.elementId, pathLen });
   }
   candidates.sort((a, b) => b.pathLen - a.pathLen);
-  const out = [];
+  const out: string[] = [];
   for (const candidate of candidates) {
     if (!out.includes(candidate.elementId)) out.push(candidate.elementId);
   }
   return out;
 }
 
-function resolveApplyAnchorUrls(anchorUrls, baseUrl) {
-  const anchors = [];
+function resolveApplyAnchorUrls(anchorUrls: string[], baseUrl: string): URL[] {
+  const anchors: URL[] = [];
   for (const raw of anchorUrls) {
     if (!raw) continue;
     try {
       anchors.push(new URL(raw, baseUrl));
-    } catch { }
+    } catch {
+    }
   }
   return anchors;
 }
 
-function identifierOverlap(candidateIds, anchorIdsList) {
+function identifierOverlap(candidateIds: Set<string>, anchorIdsList: Set<string>[]): boolean {
   for (const anchorIds of anchorIdsList) {
     for (const id of candidateIds) {
       if (anchorIds.has(id)) return true;
@@ -237,7 +254,7 @@ function identifierOverlap(candidateIds, anchorIdsList) {
   return false;
 }
 
-function isSameJobApplyScope(candidateUrl, anchorUrls, baseUrl) {
+export function isSameJobApplyScope(candidateUrl: string, anchorUrls: string[], baseUrl: string): boolean {
   if (!candidateUrl) return false;
   const anchors = resolveApplyAnchorUrls(anchorUrls, baseUrl);
   if (!anchors.length) return true;
@@ -264,11 +281,12 @@ function isSameJobApplyScope(candidateUrl, anchorUrls, baseUrl) {
         }
       }
     }
-  } catch { }
+  } catch {
+  }
   return false;
 }
 
-function isOffTargetJobUrl(candidateUrl, anchorUrls, baseUrl) {
+export function isOffTargetJobUrl(candidateUrl: string, anchorUrls: string[], baseUrl: string): boolean {
   if (!candidateUrl) return false;
   if (isSameJobApplyScope(candidateUrl, anchorUrls, baseUrl)) return false;
 
@@ -279,22 +297,50 @@ function isOffTargetJobUrl(candidateUrl, anchorUrls, baseUrl) {
       const anchorIdsList = anchors.map((anchor) => extractJobUrlIdentifiers(anchor.toString(), baseUrl));
       if (!identifierOverlap(candidateIds, anchorIdsList)) return true;
     }
-  } catch { }
+  } catch {
+  }
   return false;
 }
 
-function isReturnToListingUrl(candidateUrl, listingUrl, baseUrl) {
+export function isReturnToListingUrl(candidateUrl: string, listingUrl: string, baseUrl: string): boolean {
   if (!candidateUrl || !listingUrl) return false;
   return normalizeApplyScopeUrl(candidateUrl, baseUrl) === normalizeApplyScopeUrl(listingUrl, baseUrl);
 }
 
-function isAllowedNavigateUrl(url, baseUrl, pageHost, targetApplyUrl, hiddenApplyUrl, hasLeftTargetListing) {
+export function buildApplyAnchorUrls(targetApplyUrl: string, hiddenApplyUrl?: string | null): string[] {
+  return [targetApplyUrl, hiddenApplyUrl ?? ""].filter(Boolean);
+}
+
+export function isAllowedNavigateUrl(
+  url: string,
+  baseUrl: string,
+  _pageHost: string,
+  targetApplyUrl: string,
+  hiddenApplyUrl: string | null | undefined,
+  hasLeftTargetListing: boolean
+): boolean {
   if (hasLeftTargetListing && targetApplyUrl && isReturnToListingUrl(url, targetApplyUrl, baseUrl)) {
     return false;
   }
-  const anchors = [targetApplyUrl, hiddenApplyUrl].filter(Boolean);
+  const anchors = [targetApplyUrl, hiddenApplyUrl ?? ""].filter(Boolean);
   if (!anchors.length) {
     return true;
   }
   return isSameJobApplyScope(url, anchors, baseUrl);
+}
+
+export function resolveStemChildActionUrl(
+  action: { href?: string } | undefined,
+  applyAnchorUrls: string[],
+  pageUrl: string
+): string | null {
+  const href = action?.href ?? "";
+  if (!href) return null;
+  try {
+    const resolved = new URL(href, pageUrl).toString();
+    if (!isStemChildApplyPath(resolved, applyAnchorUrls, pageUrl)) return null;
+    return resolved;
+  } catch {
+    return null;
+  }
 }

@@ -220,6 +220,20 @@ CREATE TABLE IF NOT EXISTS kv_settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS unparsed_jobs (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  preference_id TEXT NOT NULL,
+  source_url TEXT NOT NULL,
+  source_host TEXT NOT NULL,
+  retrieved_at TEXT NOT NULL,
+  last_error TEXT,
+  FOREIGN KEY (user_id) REFERENCES users(id),
+  UNIQUE(user_id, source_url)
+);
+
+CREATE INDEX IF NOT EXISTS idx_unparsed_jobs_user_pref ON unparsed_jobs(user_id, preference_id, retrieved_at);
 `;
 
 let indexesEnsured = false;
@@ -251,6 +265,19 @@ function migrateApplicationSchema(db: Database.Database) {
   ensureColumn(db, "jobs", "applied_at_linkedin_links", "applied_at_linkedin_links TEXT NOT NULL DEFAULT '[]'");
   ensureColumn(db, "assets", "file_blob", "file_blob BLOB");
   ensureColumn(db, "users", "resume_asset_id", "resume_asset_id TEXT");
+
+  db.exec(`CREATE TABLE IF NOT EXISTS unparsed_jobs (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    preference_id TEXT NOT NULL,
+    source_url TEXT NOT NULL,
+    source_host TEXT NOT NULL,
+    retrieved_at TEXT NOT NULL,
+    last_error TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    UNIQUE(user_id, source_url)
+  )`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_unparsed_jobs_user_pref ON unparsed_jobs(user_id, preference_id, retrieved_at)`);
 
   const marker = db.prepare(`SELECT 1 AS x FROM kv_settings WHERE key = ?`).get("jobmate_resume_profile_backfill");
 

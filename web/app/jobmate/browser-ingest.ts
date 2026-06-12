@@ -27,7 +27,9 @@ import type { JobmateSqlite } from "./sqlite-client";
 export type IngestProgressEvent =
   | { kind: "phase"; step: string; detail?: string }
   | { kind: "log"; line: string }
-  | { kind: "failure"; message: string };
+  | { kind: "failure"; message: string }
+  | { kind: "inserted"; jobId: string; preferenceId: string }
+  | { kind: "refreshed"; jobId: string; preferenceId: string };
 
 function shorten(text: string, max: number) {
   const t = text.replace(/\s+/g, " ").trim();
@@ -78,6 +80,116 @@ async function runWithConcurrency<T>(items: T[], limit: number, worker: (item: T
   });
 
   await Promise.all(workers);
+}
+
+class AsyncCandidateQueue {
+  private items: SearchCandidate[] = [];
+  private seen = new Set<string>();
+  private waiters: Array<() => void> = [];
+  private closed = false;
+  private pushLimit: number;
+  private pushedCount = 0;
+
+  constructor(pushLimit: number) {
+    this.pushLimit = pushLimit;
+  }
+
+  tryPush(candidate: SearchCandidate): boolean {
+    if (this.closed || this.seen.has(candidate.sourceUrl) || this.pushedCount >= this.pushLimit) {
+      return false;
+    }
+
+    this.seen.add(candidate.sourceUrl);
+    this.items.push(candidate);
+    this.pushedCount += 1;
+    const waiter = this.waiters.shift();
+
+    if (waiter) {
+      waiter();
+    }
+
+    return true;
+  }
+
+  async take(): Promise<SearchCandidate | null> {
+    while (true) {
+      const item = this.items.shift();
+
+      if (item) {
+        return item;
+      }
+
+      if (this.closed) {
+        return null;
+      }
+
+      await new Promise<void>((resolve) => {
+        this.waiters.push(resolve);
+      });
+    }
+  }
+
+  close() {
+    this.closed = true;
+
+    for (const waiter of this.waiters) {
+      waiter();
+    }
+
+    this.waiters.length = 0;
+  }
+
+  get totalPushed() {
+    return this.pushedCount;
+  }
+}
+
+class RoundRobinPusher {
+  private buckets: SearchCandidate[][] = [];
+  private indices: number[] = [];
+  private pushed = 0;
+
+  addBucket(items: SearchCandidate[]) {
+    if (!items.length) {
+      return;
+    }
+
+    this.buckets.push(items);
+    this.indices.push(0);
+  }
+
+  pushAvailable(queue: AsyncCandidateQueue, limit: number): number {
+    let added = 0;
+
+    while (this.pushed < limit) {
+      let roundAdded = false;
+
+      for (let bucketIndex = 0; bucketIndex < this.buckets.length; bucketIndex++) {
+        while (this.indices[bucketIndex] < this.buckets[bucketIndex].length) {
+          const candidate = this.buckets[bucketIndex][this.indices[bucketIndex]];
+          this.indices[bucketIndex] += 1;
+
+          if (queue.tryPush(candidate)) {
+            this.pushed += 1;
+            added += 1;
+            roundAdded = true;
+
+            if (this.pushed >= limit) {
+              return added;
+            }
+
+            break;
+          }
+        }
+      }
+
+      if (!roundAdded) {
+        break;
+      }
+    }
+
+    return added;
+  }
 }
 
 async function fetchListingHtml(url: string): Promise<{ html: string; finalUrl: string; ok: boolean }> {
@@ -173,6 +285,82 @@ function mergeCandidateBucketsRoundRobin(buckets: SearchCandidate[][], limit: nu
   return [...deduped.values()].slice(0, limit);
 }
 
+async function loadUnparsedCandidates(
+  sqlite: JobmateSqlite,
+  userId: string,
+  prefId: string,
+  limit: number
+): Promise<SearchCandidate[]> {
+  const rows = await sqlite.all<{ source_url: string; source_host: string }>(
+    `SELECT source_url, source_host FROM unparsed_jobs
+     WHERE user_id = ? AND preference_id = ?
+     ORDER BY datetime(retrieved_at) ASC
+     LIMIT ?`,
+    [userId, prefId, limit]
+  );
+
+  return rows.map((row) => ({
+    sourceUrl: row.source_url,
+    sourceHost: row.source_host,
+    sourceTitle: "",
+    company: "",
+    location: "",
+    snippet: ""
+  }));
+}
+
+async function queueUnparsedJob(
+  sqlite: JobmateSqlite,
+  userId: string,
+  prefId: string,
+  candidate: SearchCandidate,
+  error: string
+) {
+  const now = new Date().toISOString();
+
+  await sqlite.run(
+    `INSERT OR REPLACE INTO unparsed_jobs (id, user_id, preference_id, source_url, source_host, retrieved_at, last_error)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [crypto.randomUUID(), userId, prefId, candidate.sourceUrl, candidate.sourceHost, now, error]
+  );
+}
+
+async function clearUnparsedJob(sqlite: JobmateSqlite, userId: string, sourceUrl: string) {
+  await sqlite.run(`DELETE FROM unparsed_jobs WHERE user_id = ? AND source_url = ?`, [userId, sourceUrl]);
+}
+
+async function checkJobLocationMatch(params: {
+  geminiApiKey: string | null;
+  geminiModel: string;
+  jobLocation: string;
+  listingText: string;
+  targetLocations: string[];
+}): Promise<boolean> {
+  if (!params.geminiApiKey?.trim()) {
+    throw new Error("Gemini API key is required for location matching.");
+  }
+
+  const res = await fetch("/api/job-location-match", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      geminiApiKey: params.geminiApiKey,
+      geminiModel: params.geminiModel,
+      jobLocation: params.jobLocation,
+      listingText: params.listingText,
+      targetLocations: params.targetLocations
+    })
+  });
+
+  const payload = (await res.json()) as { matches?: boolean; error?: string };
+
+  if (!res.ok) {
+    throw new Error(payload.error ?? `job-location-match failed ${res.status}`);
+  }
+
+  return payload.matches === true;
+}
+
 async function parseJobFromHtml(
   html: string,
   sourceUrl: string,
@@ -222,6 +410,402 @@ function preferenceRowToInput(row: Record<string, unknown>): PreferenceInput {
   }
 
   return parsed.data;
+}
+
+type ProcessCandidateCtx = {
+  sqlite: JobmateSqlite;
+  userId: string;
+  prefId: string;
+  digestDate: string;
+  mergedContextBase: string;
+  profileResumeAssetId: string | null;
+  profileResumePdf: Uint8Array | null;
+  geminiParse: { apiKey: string | null; model: string };
+  geminiApiKey: string | null;
+  geminiModel: string;
+  targetLocations: string[];
+  onProgress?: (event: IngestProgressEvent) => void;
+  digestJobIds: string[];
+  counters: {
+    processed: number;
+    total: number;
+    rowInserted: number;
+    rowRefreshed: number;
+    rowSkippedApplied: number;
+    rowFailed: number;
+    rowLocationSkipped: number;
+    newJobsCount: number;
+  };
+};
+
+async function processCandidate(candidate: SearchCandidate, index: number, ctx: ProcessCandidateCtx) {
+  const ord = `${index + 1}/${ctx.counters.total}`;
+  const urlShort = shorten(candidate.sourceUrl, 100);
+
+  try {
+    const existingRows = await ctx.sqlite.all<{ id: string; status: string }>(
+      `SELECT id, status FROM jobs WHERE user_id = ? AND source_url = ?`,
+      [ctx.userId, candidate.sourceUrl]
+    );
+    const existing = existingRows[0];
+
+    if (existing) {
+      ctx.onProgress?.({
+        kind: "phase",
+        step: "Existing job row",
+        detail: ord
+      });
+      ctx.onProgress?.({
+        kind: "log",
+        line: `[${ord}] Duplicate URL · ${urlShort} · ${existing.status}`
+      });
+
+      if (existing.status !== "applied") {
+        const now = new Date().toISOString();
+        await ctx.sqlite.run(
+          `UPDATE jobs
+           SET preference_id = ?, digest_date = ?, status = 'new', archived_at = NULL, updated_at = ?
+           WHERE id = ? AND user_id = ?`,
+          [ctx.prefId, ctx.digestDate, now, existing.id, ctx.userId]
+        );
+        ctx.counters.rowRefreshed += 1;
+        ctx.onProgress?.({ kind: "refreshed", jobId: existing.id, preferenceId: ctx.prefId });
+      } else {
+        ctx.counters.rowSkippedApplied += 1;
+      }
+
+      await clearUnparsedJob(ctx.sqlite, ctx.userId, candidate.sourceUrl);
+      ctx.digestJobIds.push(existing.id);
+      ctx.counters.processed += 1;
+      ctx.onProgress?.({
+        kind: "phase",
+        step: "Parse & insert listings",
+        detail: `${ctx.counters.processed}/${ctx.counters.total} processed`
+      });
+      ctx.onProgress?.({
+        kind: "log",
+        line: `[${ord}] Linked to digest · ${existing.status === "applied" ? "already applied" : "refreshed as new"}`
+      });
+      return;
+    }
+
+    ctx.onProgress?.({
+      kind: "phase",
+      step: "Fetch listing HTML",
+      detail: ord
+    });
+    ctx.onProgress?.({
+      kind: "log",
+      line: `[${ord}] GET · ${urlShort}`
+    });
+
+    const first = await fetchListingHtml(candidate.sourceUrl);
+
+    if (!first.ok || !first.html.trim()) {
+      throw new Error(
+        `fetch-html unusable (ok=${Boolean(first.ok)} bytes=${first.html.length} final=${shorten(first.finalUrl, 80)})`
+      );
+    }
+
+    const discoveredListings = extractJobListingUrlsFromHtml(first.html, first.finalUrl || candidate.sourceUrl);
+    const listingSources =
+      discoveredListings.length >= 2
+        ? discoveredListings.map((sourceUrl) => ({ sourceUrl, prefetch: null as typeof first | null }))
+        : [{ sourceUrl: candidate.sourceUrl, prefetch: first }];
+
+    if (discoveredListings.length >= 2) {
+      ctx.onProgress?.({
+        kind: "log",
+        line: `[${ord}] List page · ${discoveredListings.length} job links`
+      });
+    }
+
+    for (let li = 0; li < listingSources.length; li++) {
+      const listingSource = listingSources[li];
+      const subOrd = listingSources.length > 1 ? `${ord}.${li + 1}` : ord;
+      const fetched =
+        listingSource.prefetch ??
+        (listingSource.sourceUrl === candidate.sourceUrl
+          ? first
+          : await fetchListingHtml(listingSource.sourceUrl));
+
+      if (!fetched.ok || !fetched.html.trim()) {
+        if (listingSources.length > 1) {
+          ctx.onProgress?.({
+            kind: "log",
+            line: `[${subOrd}] Skipped · fetch failed · ${shorten(listingSource.sourceUrl, 88)}`
+          });
+          continue;
+        }
+        throw new Error(
+          `fetch-html unusable (ok=${Boolean(fetched.ok)} bytes=${fetched.html.length} final=${shorten(fetched.finalUrl, 80)})`
+        );
+      }
+
+      const existingListRows = await ctx.sqlite.all<{ id: string; status: string }>(
+        `SELECT id, status FROM jobs WHERE user_id = ? AND source_url = ?`,
+        [ctx.userId, listingSource.sourceUrl]
+      );
+      const existingList = existingListRows[0];
+
+      if (existingList) {
+        if (listingSources.length === 1) {
+          ctx.onProgress?.({
+            kind: "phase",
+            step: "Existing job row",
+            detail: subOrd
+          });
+          ctx.onProgress?.({
+            kind: "log",
+            line: `[${subOrd}] Duplicate URL · ${shorten(listingSource.sourceUrl, 100)} · ${existingList.status}`
+          });
+
+          if (existingList.status !== "applied") {
+            const now = new Date().toISOString();
+            await ctx.sqlite.run(
+              `UPDATE jobs
+               SET preference_id = ?, digest_date = ?, status = 'new', archived_at = NULL, updated_at = ?
+               WHERE id = ? AND user_id = ?`,
+              [ctx.prefId, ctx.digestDate, now, existingList.id, ctx.userId]
+            );
+            ctx.counters.rowRefreshed += 1;
+            ctx.onProgress?.({ kind: "refreshed", jobId: existingList.id, preferenceId: ctx.prefId });
+          } else {
+            ctx.counters.rowSkippedApplied += 1;
+          }
+
+          await clearUnparsedJob(ctx.sqlite, ctx.userId, listingSource.sourceUrl);
+          ctx.digestJobIds.push(existingList.id);
+          ctx.counters.processed += 1;
+          ctx.onProgress?.({
+            kind: "phase",
+            step: "Parse & insert listings",
+            detail: `${ctx.counters.processed}/${ctx.counters.total} processed`
+          });
+          ctx.onProgress?.({
+            kind: "log",
+            line: `[${subOrd}] Linked to digest · ${existingList.status === "applied" ? "already applied" : "refreshed as new"}`
+          });
+          return;
+        }
+
+        continue;
+      }
+
+      ctx.onProgress?.({
+        kind: "phase",
+        step: "Parse listing",
+        detail: subOrd
+      });
+
+      const parsed = await parseJobFromHtml(
+        fetched.html,
+        listingSource.sourceUrl,
+        { ...candidate, sourceUrl: listingSource.sourceUrl },
+        ctx.geminiParse
+      );
+
+      const locationMatches = await checkJobLocationMatch({
+        geminiApiKey: ctx.geminiApiKey,
+        geminiModel: ctx.geminiModel,
+        jobLocation: parsed.location,
+        listingText: parsed.listingText,
+        targetLocations: ctx.targetLocations
+      });
+
+      if (!locationMatches) {
+        ctx.counters.rowLocationSkipped += 1;
+        ctx.onProgress?.({
+          kind: "log",
+          line: `[${subOrd}] Location mismatch · ${shorten(parsed.location || "unknown", 80)} · ${shorten(listingSource.sourceUrl, 72)}`
+        });
+        continue;
+      }
+
+      let formFields = parsed.fields;
+      const listingNorm = listingSource.sourceUrl.replace(/[#?].*$/, "");
+      const applyNorm = normalizeApplyUrl(parsed.applyUrl);
+
+      const dupApplyRows = await ctx.sqlite.all<{ id: string; status: string }>(
+        `SELECT id, status FROM jobs WHERE user_id = ? AND apply_url = ?`,
+        [ctx.userId, applyNorm]
+      );
+
+      if (dupApplyRows.length > 0) {
+        const hasApplied = dupApplyRows.some((r) => r.status === "applied");
+
+        if (hasApplied) {
+          if (listingSources.length === 1) {
+            ctx.counters.rowSkippedApplied += 1;
+            ctx.counters.processed += 1;
+          }
+          continue;
+        }
+
+        const openDup = dupApplyRows.find((r) => r.status === "new" || r.status === "reviewed");
+
+        if (openDup) {
+          const now = new Date().toISOString();
+          await ctx.sqlite.run(
+            `UPDATE jobs
+             SET preference_id = ?, digest_date = ?, status = 'new', archived_at = NULL, updated_at = ?
+             WHERE id = ? AND user_id = ?`,
+            [ctx.prefId, ctx.digestDate, now, openDup.id, ctx.userId]
+          );
+          await clearUnparsedJob(ctx.sqlite, ctx.userId, listingSource.sourceUrl);
+          ctx.digestJobIds.push(openDup.id);
+          ctx.counters.rowRefreshed += 1;
+          ctx.onProgress?.({ kind: "refreshed", jobId: openDup.id, preferenceId: ctx.prefId });
+          ctx.counters.processed += 1;
+          if (listingSources.length === 1) {
+            ctx.onProgress?.({
+              kind: "log",
+              line: `[${subOrd}] Duplicate apply · refreshed open row · ${shorten(applyNorm, 88)}`
+            });
+          }
+          continue;
+        }
+      }
+
+      if (applyNorm.replace(/[#?].*$/, "") !== listingNorm) {
+        try {
+          const fh = await fetchListingHtml(parsed.applyUrl);
+          if (fh.ok && fh.html.trim()) {
+            const applyParsed = await parseJobFromHtml(fh.html, parsed.applyUrl, candidate, ctx.geminiParse);
+            if (applyParsed.fields.length > 0) {
+              formFields = applyParsed.fields;
+            }
+          }
+        } catch {
+        }
+      }
+
+      const fieldAnswers = await generateFieldAnswersWithGemini({
+        geminiApiKey: ctx.geminiApiKey,
+        geminiModel: ctx.geminiModel,
+        contextBlock: ctx.mergedContextBase,
+        listingText: parsed.listingText,
+        fields: formFields,
+        resumePdfBytes: ctx.profileResumePdf
+      });
+
+      const enrichRes = await fetch("/api/job-enrich", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          geminiApiKey: ctx.geminiApiKey ?? "",
+          geminiModel: ctx.geminiModel,
+          title: parsed.title,
+          company: parsed.company,
+          location: parsed.location,
+          listingText: parsed.listingText,
+          sourceUrl: listingSource.sourceUrl,
+          parsedHomepage: parsed.companyHomepage ?? null,
+          parsedLinkedinLinks: [],
+          parsedHiringContacts: [],
+          parsedSummary: parsed.summary,
+          parsedCompensationRange: parsed.compensationRange ?? null,
+          includeLeadSearch: false
+        })
+      });
+
+      const enrichPayload = (await enrichRes.json()) as {
+        compensationRange?: string | null;
+        companyHomepage?: string | null;
+        linkedinLinks?: string[];
+        hiringContacts?: string[];
+        summary?: string;
+        error?: string;
+      };
+
+      if (!enrichRes.ok) {
+        throw new Error(enrichPayload.error ?? `job-enrich failed ${enrichRes.status}`);
+      }
+
+      const compensationRangeFinal = enrichPayload.compensationRange ?? parsed.compensationRange ?? null;
+      const companyHomepageFinal = enrichPayload.companyHomepage ?? parsed.companyHomepage ?? null;
+      const summaryFinal = enrichPayload.summary ?? parsed.summary;
+      const postedAtFinal = parsed.postedAt ?? null;
+      const companyLogoUrlFinal = parsed.companyLogoUrl ?? null;
+
+      const jobId = crypto.randomUUID();
+      const now = new Date().toISOString();
+
+      await ctx.sqlite.run(
+        `INSERT INTO jobs (
+            id, user_id, preference_id, digest_date, source_url, source_host, source_title,
+            company, location, compensation_range, company_homepage, linkedin_links, hiring_contacts,
+            summary, listing_text, apply_url, fields,
+            resume_asset_id, cover_letter_asset_id, status, discovered_at, posted_at, company_logo_url,
+            applied_at, archived_at, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          jobId,
+          ctx.userId,
+          ctx.prefId,
+          ctx.digestDate,
+          listingSource.sourceUrl,
+          candidate.sourceHost,
+          parsed.title,
+          parsed.company,
+          parsed.location,
+          compensationRangeFinal,
+          companyHomepageFinal,
+          JSON.stringify([]),
+          JSON.stringify([]),
+          summaryFinal,
+          parsed.listingText,
+          normalizeApplyUrl(parsed.applyUrl),
+          JSON.stringify(fieldAnswers),
+          ctx.profileResumeAssetId,
+          null,
+          "new",
+          now,
+          postedAtFinal,
+          companyLogoUrlFinal,
+          null,
+          null,
+          now,
+          now
+        ]
+      );
+
+      await clearUnparsedJob(ctx.sqlite, ctx.userId, listingSource.sourceUrl);
+      ctx.digestJobIds.push(jobId);
+      ctx.counters.rowInserted += 1;
+      ctx.counters.newJobsCount += 1;
+      ctx.onProgress?.({ kind: "inserted", jobId, preferenceId: ctx.prefId });
+      ctx.onProgress?.({
+        kind: "log",
+        line: `[${subOrd}] Inserted · ${shorten(parsed.title, 70)} · ${shorten(listingSource.sourceUrl, 72)}`
+      });
+    }
+
+    ctx.counters.processed += 1;
+    ctx.onProgress?.({
+      kind: "phase",
+      step: "Parse & insert listings",
+      detail: `${ctx.counters.processed}/${ctx.counters.total} processed`
+    });
+  } catch (err) {
+    ctx.counters.processed += 1;
+    ctx.counters.rowFailed += 1;
+    const message = ingestErrMessage(err);
+    await queueUnparsedJob(ctx.sqlite, ctx.userId, ctx.prefId, candidate, message);
+    ctx.onProgress?.({
+      kind: "phase",
+      step: "Parse & insert listings",
+      detail: `${ctx.counters.processed}/${ctx.counters.total} processed`
+    });
+    ctx.onProgress?.({
+      kind: "failure",
+      message: `[${ord}] ${urlShort} · ${shorten(message, 220)}`
+    });
+    ctx.onProgress?.({
+      kind: "log",
+      line: `[${ord}] Failed · ${urlShort} · ${shorten(message, 180)} · queued for retry`
+    });
+  }
 }
 
 export async function runBrowserIngestion(opts: {
@@ -303,531 +887,261 @@ export async function runBrowserIngestion(opts: {
     });
 
     const localNow = nowInTimezoneParts(timezone);
-    let jobTeaserCandidates: SearchCandidate[] = [];
-    let workAtAStartupCandidates: SearchCandidate[] = [];
-    const jobTeaserEnabled = hasJobTeaserBoard(enriched.boardDomains);
-    const workAtAStartupEnabled = hasWorkAtAStartupBoard(enriched.boardDomains);
-
-    if (jobTeaserEnabled) {
-      opts.onProgress?.({
-        kind: "phase",
-        step: "JobTeaser search",
-        detail: `${input.locations.length} location${input.locations.length === 1 ? "" : "s"}`
-      });
-
-      const specs = await buildJobTeaserSearchSpecsBrowser(input);
-      const bySpec = await fetchJobTeaserCandidatesViaExtensionBatch(specs, perTargetLimit);
-      const buckets = specs.map((spec) => bySpec.get(spec.id) ?? []);
-      jobTeaserCandidates = mergeCandidateBucketsRoundRobin(buckets, perTargetLimit);
-
-      opts.onProgress?.({
-        kind: "log",
-        line: `JobTeaser collected ${jobTeaserCandidates.length} listing URL${jobTeaserCandidates.length === 1 ? "" : "s"}.`
-      });
-    }
-
-    if (workAtAStartupEnabled) {
-      opts.onProgress?.({
-        kind: "phase",
-        step: "Work at a Startup search",
-        detail: `${input.locations.length} location${input.locations.length === 1 ? "" : "s"}`
-      });
-
-      const specs = buildWorkAtAStartupSearchSpecsBrowser(input);
-      const bySpec = await fetchWorkAtAStartupCandidatesViaExtensionBatch(specs, perTargetLimit);
-      const buckets = specs.map((spec) => bySpec.get(spec.id) ?? []);
-      workAtAStartupCandidates = mergeCandidateBucketsRoundRobin(buckets, perTargetLimit);
-
-      opts.onProgress?.({
-        kind: "log",
-        line: `Work at a Startup collected ${workAtAStartupCandidates.length} listing URL${workAtAStartupCandidates.length === 1 ? "" : "s"}.`
-      });
-    }
-
-    const trimmedForExt = enriched.searchQueries.map((q) => q.trim()).filter(Boolean);
-    const uniqQueriesForExt = [...new Set(trimmedForExt)];
-
-    const extensionOrganicByTrimmed = new Map<string, OrganicSearchResult[]>();
-
-    if (uniqQueriesForExt.length) {
-      opts.onProgress?.({
-        kind: "phase",
-        step: "Google search (Chrome extension)",
-        detail: `${uniqQueriesForExt.length} quer${uniqQueriesForExt.length === 1 ? "y" : "ies"}`
-      });
-
-      for (let qi = 0; qi < uniqQueriesForExt.length; qi++) {
-        const q = uniqQueriesForExt[qi];
-
-        opts.onProgress?.({
-          kind: "phase",
-          step: "Google search (Chrome extension)",
-          detail: `Query ${qi + 1} of ${uniqQueriesForExt.length}`
-        });
-
-        opts.onProgress?.({
-          kind: "log",
-          line: `Searching: ${shorten(q, 160)}`
-        });
-
-        const part = await fetchGoogleOrganicViaExtensionBatch([q], perTargetLimit);
-        const rows = part.get(q) ?? [];
-        extensionOrganicByTrimmed.set(q, rows);
-
-        const hostSample = rows
-          .slice(0, 5)
-          .map((r) => {
-            try {
-              return new URL(r.link).hostname.replace(/^www\./i, "");
-            } catch {
-              return shorten(r.link, 36);
-            }
-          })
-          .join(", ");
-
-        opts.onProgress?.({
-          kind: "log",
-          line: `Collected ${rows.length} organic URLs${hostSample ? `: ${hostSample}${rows.length > 5 ? ", …" : ""}` : ""}`
-        });
-      }
-    }
-
-    const googleCandidates =
-      enriched.searchQueries.length > 0
-        ? await searchGoogleListingsWithOrganicFetcher(
-            enriched.searchQueries,
-            (q, lim) => {
-              const rows = extensionOrganicByTrimmed.get(q.trim()) ?? [];
-              return Promise.resolve(rows.slice(0, lim));
-            },
-            {
-              limit: perTargetLimit,
-              boardDomains: enriched.boardDomains
-            }
-          )
-        : [];
-
-    let googleJobsCandidates: SearchCandidate[] = [];
-    if (hasGoogleJobsBoard(enriched.boardDomains) && uniqQueriesForExt.length) {
-      opts.onProgress?.({
-        kind: "phase",
-        step: "Google Jobs search",
-        detail: `${uniqQueriesForExt.length} quer${uniqQueriesForExt.length === 1 ? "y" : "ies"}`
-      });
-      for (let qi = 0; qi < uniqQueriesForExt.length; qi++) {
-        const q = uniqQueriesForExt[qi];
-        const url = buildGoogleJobsUrl(q);
-        if (!url) continue;
-        try {
-          const rows = await fetchGoogleJobsCandidatesViaExtension(url, perTargetLimit);
-          googleJobsCandidates.push(...rows);
-        } catch (e) {
-          opts.onProgress?.({ kind: "failure", message: `Google Jobs query failed: ${ingestErrMessage(e)}` });
-        }
-      }
-      googleJobsCandidates = mergeCandidateBucketsRoundRobin([googleJobsCandidates], perTargetLimit);
-      opts.onProgress?.({
-        kind: "log",
-        line: `Google Jobs: ${googleJobsCandidates.length} direct company listing URL${googleJobsCandidates.length === 1 ? "" : "s"}`
-      });
-    }
-
-    const candidates = mergeCandidateBucketsRoundRobin(
-      [jobTeaserCandidates, workAtAStartupCandidates, googleCandidates, googleJobsCandidates],
-      perTargetLimit
-    );
-
-    const mergedSourceLabels = [
-      jobTeaserEnabled ? "JobTeaser" : "",
-      workAtAStartupEnabled ? "Work at a Startup" : "",
-      enriched.searchQueries.length > 0 ? "Google (Chrome extension)" : "",
-      googleJobsCandidates.length > 0 ? "Google Jobs" : ""
-    ].filter(Boolean);
-
-    totalRetrieved += candidates.length;
-    opts.onProgress?.({
-      kind: "phase",
-      step: "Listings after filters",
-      detail: `${candidates.length} URLs · ${prefTitle}`
-    });
-    opts.onProgress?.({
-      kind: "log",
-      line: `Merged ${candidates.length} candidate listing URL${candidates.length === 1 ? "" : "s"} (${mergedSourceLabels.join(" + ") || "none"}).`
-    });
-
     const profileBlock = profileRow ? formatProfileBlock(profileRow) : "";
     const mergedContextBase = [profileBlock, enriched.contextBlock].filter((s) => s.trim().length > 0).join("\n\n---\n\n");
     const digestDate = localNow.date;
     const digestJobIds: string[] = [];
-    let processed = 0;
-    let rowInserted = 0;
-    let rowRefreshed = 0;
-    let rowSkippedApplied = 0;
-    let rowFailed = 0;
+    const counters = {
+      processed: 0,
+      total: 0,
+      rowInserted: 0,
+      rowRefreshed: 0,
+      rowSkippedApplied: 0,
+      rowFailed: 0,
+      rowLocationSkipped: 0,
+      newJobsCount: 0
+    };
 
-    type QueueItem = { candidate: SearchCandidate; index: number };
-    const queueItems: QueueItem[] = candidates.map((candidate, index) => ({ candidate, index }));
+    const queuedCandidates = await loadUnparsedCandidates(opts.sqlite, opts.userId, prefId, perTargetLimit);
+    const newSearchBudget = Math.max(0, perTargetLimit - queuedCandidates.length);
 
-    opts.onProgress?.({
-      kind: "phase",
-      step: "Parse & insert listings",
-      detail: candidates.length ? `${candidates.length} URLs · concurrency 5` : "No listings"
-    });
-    opts.onProgress?.({
-      kind: "log",
-      line: candidates.length
-        ? `Parse queue · ${candidates.length} URLs · fetch HTML → parse → apply page (optional) → field answers → enrich → insert`
-        : "Parse queue empty (nothing to insert)."
-    });
+    if (queuedCandidates.length) {
+      opts.onProgress?.({
+        kind: "log",
+        line: `Draining ${queuedCandidates.length} queued URL${queuedCandidates.length === 1 ? "" : "s"} from prior run.`
+      });
+    }
 
-    await runWithConcurrency(queueItems, 5, async ({ candidate, index }) => {
-      const ord = `${index + 1}/${candidates.length}`;
-      const urlShort = shorten(candidate.sourceUrl, 100);
+    const candidateQueue = new AsyncCandidateQueue(perTargetLimit);
 
-      try {
-        const existingRows = await opts.sqlite.all<{ id: string; status: string }>(
-          `SELECT id, status FROM jobs WHERE user_id = ? AND source_url = ?`,
-          [opts.userId, candidate.sourceUrl]
-        );
-        const existing = existingRows[0];
+    for (const candidate of queuedCandidates) {
+      candidateQueue.tryPush(candidate);
+    }
 
-        if (existing) {
-          opts.onProgress?.({
-            kind: "phase",
-            step: "Existing job row",
-            detail: ord
-          });
-          opts.onProgress?.({
-            kind: "log",
-            line: `[${ord}] Duplicate URL · ${urlShort} · ${existing.status}`
-          });
+    counters.total = candidateQueue.totalPushed;
 
-          if (existing.status !== "applied") {
-            const now = new Date().toISOString();
-            await opts.sqlite.run(
-              `UPDATE jobs
-               SET preference_id = ?, digest_date = ?, status = 'new', archived_at = NULL, updated_at = ?
-               WHERE id = ? AND user_id = ?`,
-              [prefId, digestDate, now, existing.id, opts.userId]
-            );
-            rowRefreshed += 1;
-          } else {
-            rowSkippedApplied += 1;
-          }
+    const processCtx: ProcessCandidateCtx = {
+      sqlite: opts.sqlite,
+      userId: opts.userId,
+      prefId,
+      digestDate,
+      mergedContextBase,
+      profileResumeAssetId,
+      profileResumePdf,
+      geminiParse,
+      geminiApiKey: opts.geminiApiKey,
+      geminiModel: opts.geminiModel,
+      targetLocations: input.locations,
+      onProgress: opts.onProgress,
+      digestJobIds,
+      counters
+    };
 
-          digestJobIds.push(existing.id);
-          processed += 1;
-          opts.onProgress?.({
-            kind: "phase",
-            step: "Parse & insert listings",
-            detail: `${processed}/${candidates.length} processed`
-          });
-          opts.onProgress?.({
-            kind: "log",
-            line: `[${ord}] Linked to digest · ${existing.status === "applied" ? "already applied" : "refreshed as new"}`
-          });
-          return;
+    let candidateIndex = 0;
+
+    const parseWorkers = Array.from({ length: 5 }, async () => {
+      while (true) {
+        const candidate = await candidateQueue.take();
+
+        if (!candidate) {
+          break;
         }
 
-        opts.onProgress?.({
-          kind: "phase",
-          step: "Fetch listing HTML",
-          detail: ord
-        });
-        opts.onProgress?.({
-          kind: "log",
-          line: `[${ord}] GET · ${urlShort}`
-        });
-
-        const first = await fetchListingHtml(candidate.sourceUrl);
-
-        if (!first.ok || !first.html.trim()) {
-          throw new Error(
-            `fetch-html unusable (ok=${Boolean(first.ok)} bytes=${first.html.length} final=${shorten(first.finalUrl, 80)})`
-          );
-        }
-
-        const discoveredListings = extractJobListingUrlsFromHtml(first.html, first.finalUrl || candidate.sourceUrl);
-        const listingSources =
-          discoveredListings.length >= 2
-            ? discoveredListings.map((sourceUrl) => ({ sourceUrl, prefetch: null as typeof first | null }))
-            : [{ sourceUrl: candidate.sourceUrl, prefetch: first }];
-
-        if (discoveredListings.length >= 2) {
-          opts.onProgress?.({
-            kind: "log",
-            line: `[${ord}] List page · ${discoveredListings.length} job links`
-          });
-        }
-
-        for (let li = 0; li < listingSources.length; li++) {
-          const listingSource = listingSources[li];
-          const subOrd = listingSources.length > 1 ? `${ord}.${li + 1}` : ord;
-          const fetched =
-            listingSource.prefetch ??
-            (listingSource.sourceUrl === candidate.sourceUrl
-              ? first
-              : await fetchListingHtml(listingSource.sourceUrl));
-
-          if (!fetched.ok || !fetched.html.trim()) {
-            if (listingSources.length > 1) {
-              opts.onProgress?.({
-                kind: "log",
-                line: `[${subOrd}] Skipped · fetch failed · ${shorten(listingSource.sourceUrl, 88)}`
-              });
-              continue;
-            }
-            throw new Error(
-              `fetch-html unusable (ok=${Boolean(fetched.ok)} bytes=${fetched.html.length} final=${shorten(fetched.finalUrl, 80)})`
-            );
-          }
-
-          const existingListRows = await opts.sqlite.all<{ id: string; status: string }>(
-            `SELECT id, status FROM jobs WHERE user_id = ? AND source_url = ?`,
-            [opts.userId, listingSource.sourceUrl]
-          );
-          const existingList = existingListRows[0];
-
-          if (existingList) {
-            if (listingSources.length === 1) {
-              opts.onProgress?.({
-                kind: "phase",
-                step: "Existing job row",
-                detail: subOrd
-              });
-              opts.onProgress?.({
-                kind: "log",
-                line: `[${subOrd}] Duplicate URL · ${shorten(listingSource.sourceUrl, 100)} · ${existingList.status}`
-              });
-
-              if (existingList.status !== "applied") {
-                const now = new Date().toISOString();
-                await opts.sqlite.run(
-                  `UPDATE jobs
-                   SET preference_id = ?, digest_date = ?, status = 'new', archived_at = NULL, updated_at = ?
-                   WHERE id = ? AND user_id = ?`,
-                  [prefId, digestDate, now, existingList.id, opts.userId]
-                );
-                rowRefreshed += 1;
-              } else {
-                rowSkippedApplied += 1;
-              }
-
-              digestJobIds.push(existingList.id);
-              processed += 1;
-              opts.onProgress?.({
-                kind: "phase",
-                step: "Parse & insert listings",
-                detail: `${processed}/${candidates.length} processed`
-              });
-              opts.onProgress?.({
-                kind: "log",
-                line: `[${subOrd}] Linked to digest · ${existingList.status === "applied" ? "already applied" : "refreshed as new"}`
-              });
-              return;
-            }
-
-            continue;
-          }
-
-          opts.onProgress?.({
-            kind: "phase",
-            step: "Parse listing",
-            detail: subOrd
-          });
-
-          const parsed = await parseJobFromHtml(
-            fetched.html,
-            listingSource.sourceUrl,
-            { ...candidate, sourceUrl: listingSource.sourceUrl },
-            geminiParse
-          );
-
-          let formFields = parsed.fields;
-          const listingNorm = listingSource.sourceUrl.replace(/[#?].*$/, "");
-          const applyNorm = normalizeApplyUrl(parsed.applyUrl);
-
-          const dupApplyRows = await opts.sqlite.all<{ id: string; status: string }>(
-            `SELECT id, status FROM jobs WHERE user_id = ? AND apply_url = ?`,
-            [opts.userId, applyNorm]
-          );
-
-          if (dupApplyRows.length > 0) {
-            const hasApplied = dupApplyRows.some((r) => r.status === "applied");
-
-            if (hasApplied) {
-              if (listingSources.length === 1) {
-                rowSkippedApplied += 1;
-                processed += 1;
-              }
-              continue;
-            }
-
-            const openDup = dupApplyRows.find((r) => r.status === "new" || r.status === "reviewed");
-
-            if (openDup) {
-              const now = new Date().toISOString();
-              await opts.sqlite.run(
-                `UPDATE jobs
-                 SET preference_id = ?, digest_date = ?, status = 'new', archived_at = NULL, updated_at = ?
-                 WHERE id = ? AND user_id = ?`,
-                [prefId, digestDate, now, openDup.id, opts.userId]
-              );
-              digestJobIds.push(openDup.id);
-              rowRefreshed += 1;
-              processed += 1;
-              if (listingSources.length === 1) {
-                opts.onProgress?.({
-                  kind: "log",
-                  line: `[${subOrd}] Duplicate apply · refreshed open row · ${shorten(applyNorm, 88)}`
-                });
-              }
-              continue;
-            }
-          }
-
-          if (applyNorm.replace(/[#?].*$/, "") !== listingNorm) {
-            try {
-              const fh = await fetchListingHtml(parsed.applyUrl);
-              if (fh.ok && fh.html.trim()) {
-                const applyParsed = await parseJobFromHtml(fh.html, parsed.applyUrl, candidate, geminiParse);
-                if (applyParsed.fields.length > 0) {
-                  formFields = applyParsed.fields;
-                }
-              }
-            } catch {
-            }
-          }
-
-          const fieldAnswers = await generateFieldAnswersWithGemini({
-            geminiApiKey: opts.geminiApiKey,
-            geminiModel: opts.geminiModel,
-            contextBlock: mergedContextBase,
-            listingText: parsed.listingText,
-            fields: formFields,
-            resumePdfBytes: profileResumePdf
-          });
-
-          const enrichRes = await fetch("/api/job-enrich", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              geminiApiKey: opts.geminiApiKey ?? "",
-              geminiModel: opts.geminiModel,
-              title: parsed.title,
-              company: parsed.company,
-              location: parsed.location,
-              listingText: parsed.listingText,
-              sourceUrl: listingSource.sourceUrl,
-              parsedHomepage: parsed.companyHomepage ?? null,
-              parsedLinkedinLinks: [],
-              parsedHiringContacts: [],
-              parsedSummary: parsed.summary,
-              parsedCompensationRange: parsed.compensationRange ?? null,
-              includeLeadSearch: false
-            })
-          });
-
-          const enrichPayload = (await enrichRes.json()) as {
-            compensationRange?: string | null;
-            companyHomepage?: string | null;
-            linkedinLinks?: string[];
-            hiringContacts?: string[];
-            summary?: string;
-            error?: string;
-          };
-
-          if (!enrichRes.ok) {
-            throw new Error(enrichPayload.error ?? `job-enrich failed ${enrichRes.status}`);
-          }
-
-          const compensationRangeFinal =
-            enrichPayload.compensationRange ?? parsed.compensationRange ?? null;
-          const companyHomepageFinal = enrichPayload.companyHomepage ?? parsed.companyHomepage ?? null;
-          const summaryFinal = enrichPayload.summary ?? parsed.summary;
-          const postedAtFinal = parsed.postedAt ?? null;
-          const companyLogoUrlFinal = parsed.companyLogoUrl ?? null;
-
-          const jobId = crypto.randomUUID();
-          const now = new Date().toISOString();
-
-          await opts.sqlite.run(
-            `INSERT INTO jobs (
-            id, user_id, preference_id, digest_date, source_url, source_host, source_title,
-            company, location, compensation_range, company_homepage, linkedin_links, hiring_contacts,
-            summary, listing_text, apply_url, fields,
-            resume_asset_id, cover_letter_asset_id, status, discovered_at, posted_at, company_logo_url,
-            applied_at, archived_at, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [
-              jobId,
-              opts.userId,
-              prefId,
-              digestDate,
-              listingSource.sourceUrl,
-              candidate.sourceHost,
-              parsed.title,
-              parsed.company,
-              parsed.location,
-              compensationRangeFinal,
-              companyHomepageFinal,
-              JSON.stringify([]),
-              JSON.stringify([]),
-              summaryFinal,
-              parsed.listingText,
-              normalizeApplyUrl(parsed.applyUrl),
-              JSON.stringify(fieldAnswers),
-              profileResumeAssetId,
-              null,
-              "new",
-              now,
-              postedAtFinal,
-              companyLogoUrlFinal,
-              null,
-              null,
-              now,
-              now
-            ]
-          );
-
-          digestJobIds.push(jobId);
-          rowInserted += 1;
-          newJobsCount += 1;
-          opts.onProgress?.({
-            kind: "log",
-            line: `[${subOrd}] Inserted · ${shorten(parsed.title, 70)} · ${shorten(listingSource.sourceUrl, 72)}`
-          });
-        }
-
-        processed += 1;
-        opts.onProgress?.({
-          kind: "phase",
-          step: "Parse & insert listings",
-          detail: `${processed}/${candidates.length} processed`
-        });
-        return;
-      } catch (err) {
-        processed += 1;
-        rowFailed += 1;
-        opts.onProgress?.({
-          kind: "phase",
-          step: "Parse & insert listings",
-          detail: `${processed}/${candidates.length} processed`
-        });
-        opts.onProgress?.({
-          kind: "failure",
-          message: `[${ord}] ${urlShort} · ${shorten(ingestErrMessage(err), 220)}`
-        });
-        opts.onProgress?.({
-          kind: "log",
-          line: `[${ord}] Failed · ${urlShort} · ${shorten(ingestErrMessage(err), 180)}`
-        });
+        candidateIndex += 1;
+        await processCandidate(candidate, candidateIndex, processCtx);
       }
     });
 
+    const jobTeaserEnabled = hasJobTeaserBoard(enriched.boardDomains);
+    const workAtAStartupEnabled = hasWorkAtAStartupBoard(enriched.boardDomains);
+    const trimmedForExt = enriched.searchQueries.map((q) => q.trim()).filter(Boolean);
+    const uniqQueriesForExt = [...new Set(trimmedForExt)];
+    const pusher = new RoundRobinPusher();
+
+    const retrievalTasks: Promise<void>[] = [];
+
+    if (newSearchBudget > 0 && jobTeaserEnabled) {
+      retrievalTasks.push(
+        (async () => {
+          opts.onProgress?.({
+            kind: "phase",
+            step: "JobTeaser search",
+            detail: `${input.locations.length} location${input.locations.length === 1 ? "" : "s"}`
+          });
+
+          const specs = await buildJobTeaserSearchSpecsBrowser(input);
+          const bySpec = await fetchJobTeaserCandidatesViaExtensionBatch(specs, newSearchBudget);
+          const buckets = specs.map((spec) => bySpec.get(spec.id) ?? []);
+          const merged = mergeCandidateBucketsRoundRobin(buckets, newSearchBudget);
+          pusher.addBucket(merged);
+          const added = pusher.pushAvailable(candidateQueue, newSearchBudget);
+          counters.total = candidateQueue.totalPushed;
+
+          opts.onProgress?.({
+            kind: "log",
+            line: `JobTeaser collected ${merged.length} listing URL${merged.length === 1 ? "" : "s"} · ${added} queued for parse.`
+          });
+        })()
+      );
+    }
+
+    if (newSearchBudget > 0 && workAtAStartupEnabled) {
+      retrievalTasks.push(
+        (async () => {
+          opts.onProgress?.({
+            kind: "phase",
+            step: "Work at a Startup search",
+            detail: `${input.locations.length} location${input.locations.length === 1 ? "" : "s"}`
+          });
+
+          const specs = buildWorkAtAStartupSearchSpecsBrowser(input);
+          const bySpec = await fetchWorkAtAStartupCandidatesViaExtensionBatch(specs, newSearchBudget);
+          const buckets = specs.map((spec) => bySpec.get(spec.id) ?? []);
+          const merged = mergeCandidateBucketsRoundRobin(buckets, newSearchBudget);
+          pusher.addBucket(merged);
+          const added = pusher.pushAvailable(candidateQueue, newSearchBudget);
+          counters.total = Math.max(counters.total, candidateQueue.totalPushed);
+
+          opts.onProgress?.({
+            kind: "log",
+            line: `Work at a Startup collected ${merged.length} listing URL${merged.length === 1 ? "" : "s"} · ${added} queued for parse.`
+          });
+        })()
+      );
+    }
+
+    if (newSearchBudget > 0 && uniqQueriesForExt.length) {
+      retrievalTasks.push(
+        (async () => {
+          opts.onProgress?.({
+            kind: "phase",
+            step: "Google search (Chrome extension)",
+            detail: `${uniqQueriesForExt.length} quer${uniqQueriesForExt.length === 1 ? "y" : "ies"}`
+          });
+
+          const extensionOrganicByTrimmed = new Map<string, OrganicSearchResult[]>();
+
+          await runWithConcurrency(
+            uniqQueriesForExt.map((q, qi) => ({ q, qi })),
+            3,
+            async ({ q, qi }) => {
+            opts.onProgress?.({
+              kind: "phase",
+              step: "Google search (Chrome extension)",
+              detail: `Query ${qi + 1} of ${uniqQueriesForExt.length}`
+            });
+            opts.onProgress?.({
+              kind: "log",
+              line: `Searching: ${shorten(q, 160)}`
+            });
+
+            const part = await fetchGoogleOrganicViaExtensionBatch([q], newSearchBudget);
+            const rows = part.get(q) ?? [];
+            extensionOrganicByTrimmed.set(q, rows);
+
+            opts.onProgress?.({
+              kind: "log",
+              line: `Collected ${rows.length} organic URLs for query ${qi + 1}.`
+            });
+            }
+          );
+
+          const googleCandidates =
+            enriched.searchQueries.length > 0
+              ? await searchGoogleListingsWithOrganicFetcher(
+                  enriched.searchQueries,
+                  (q, lim) => {
+                    const rows = extensionOrganicByTrimmed.get(q.trim()) ?? [];
+                    return Promise.resolve(rows.slice(0, lim));
+                  },
+                  {
+                    limit: newSearchBudget,
+                    boardDomains: enriched.boardDomains
+                  }
+                )
+              : [];
+
+          pusher.addBucket(googleCandidates);
+          const added = pusher.pushAvailable(candidateQueue, newSearchBudget);
+          counters.total = Math.max(counters.total, candidateQueue.totalPushed);
+
+          opts.onProgress?.({
+            kind: "log",
+            line: `Google organic merged ${googleCandidates.length} listing URL${googleCandidates.length === 1 ? "" : "s"} · ${added} queued for parse.`
+          });
+        })()
+      );
+    }
+
+    if (newSearchBudget > 0 && hasGoogleJobsBoard(enriched.boardDomains) && uniqQueriesForExt.length) {
+      retrievalTasks.push(
+        (async () => {
+          opts.onProgress?.({
+            kind: "phase",
+            step: "Google Jobs search",
+            detail: `${uniqQueriesForExt.length} quer${uniqQueriesForExt.length === 1 ? "y" : "ies"}`
+          });
+
+          const googleJobsBuckets: SearchCandidate[][] = [];
+
+          await runWithConcurrency(uniqQueriesForExt, 3, async (q) => {
+            const url = buildGoogleJobsUrl(q);
+            if (!url) return;
+
+            try {
+              const rows = await fetchGoogleJobsCandidatesViaExtension(url, newSearchBudget);
+              googleJobsBuckets.push(rows);
+              pusher.addBucket(rows);
+              pusher.pushAvailable(candidateQueue, newSearchBudget);
+              counters.total = Math.max(counters.total, candidateQueue.totalPushed);
+            } catch (e) {
+              opts.onProgress?.({ kind: "failure", message: `Google Jobs query failed: ${ingestErrMessage(e)}` });
+            }
+          });
+
+          const merged = mergeCandidateBucketsRoundRobin(googleJobsBuckets, newSearchBudget);
+          opts.onProgress?.({
+            kind: "log",
+            line: `Google Jobs: ${merged.length} direct company listing URL${merged.length === 1 ? "" : "s"}.`
+          });
+        })()
+      );
+    }
+
+    if (candidateQueue.totalPushed) {
+      opts.onProgress?.({
+        kind: "phase",
+        step: "Parse & insert listings",
+        detail: `${candidateQueue.totalPushed} URLs · concurrency 5`
+      });
+      opts.onProgress?.({
+        kind: "log",
+        line: `Parse queue · ${candidateQueue.totalPushed} URLs · fetch HTML → parse → location check → field answers → enrich → insert`
+      });
+    } else if (retrievalTasks.length) {
+      opts.onProgress?.({
+        kind: "phase",
+        step: "Parse & insert listings",
+        detail: "Waiting for retrieval"
+      });
+    }
+
+    await Promise.all(retrievalTasks);
+    counters.total = Math.max(counters.total, candidateQueue.totalPushed);
+    candidateQueue.close();
+    await Promise.all(parseWorkers);
+
+    totalRetrieved += candidateQueue.totalPushed;
+    newJobsCount += counters.newJobsCount;
+
+    opts.onProgress?.({
+      kind: "phase",
+      step: "Listings after filters",
+      detail: `${candidateQueue.totalPushed} URLs · ${prefTitle}`
+    });
     opts.onProgress?.({
       kind: "log",
-      line: `Parse summary · ${rowInserted} inserted · ${rowRefreshed} refreshed · ${rowSkippedApplied} already-applied · ${rowFailed} failed`
+      line: `Parse summary · ${counters.rowInserted} inserted · ${counters.rowRefreshed} refreshed · ${counters.rowSkippedApplied} already-applied · ${counters.rowLocationSkipped} location-mismatch · ${counters.rowFailed} failed`
     });
 
     if (!digestJobIds.length) {

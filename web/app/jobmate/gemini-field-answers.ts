@@ -27,14 +27,6 @@ type GeminiUserPart =
 const GEMINI_FALLBACK_MODEL = "gemini-2-flash";
 const GEMINI_STABLE_FALLBACK_MODEL = "gemini-3.1-flash-lite";
 
-const COMPENSATION_INSTRUCTIONS = [
-  "For desired salary, compensation expectation, salary range, pay, rate, or minimum compensation fields, analyze the listing's posted compensation and the candidate's preferred compensation range from the candidate context.",
-  "If the listing includes compensation, answer with a concise value or range inside the overlap between the posted range and the candidate's preferred range.",
-  "If there is overlap and the candidate is a strong fit, lean toward the upper half of that overlap.",
-  "If the listing does not include compensation, answer from the candidate's preferred compensation range.",
-  "Do not leave required compensation fields empty when the candidate context contains a preferred compensation range."
-];
-
 function parseJsonObject(text: string) {
   const trimmed = text.trim();
 
@@ -203,21 +195,12 @@ export async function generateFieldAnswersWithGemini(params: {
   const prompt = [
     "You are generating direct job application form answers.",
     hasPdf
-      ? "Use only the provided candidate context and the attached resume PDF file."
-      : "Use only the provided candidate context.",
-    "Read each field label carefully and answer that exact question.",
-    "Never answer a different question than the field asks.",
-    "Every field must receive an answer. Never leave a required field empty.",
-    "If a field asks about visa sponsorship, work authorization, immigration status, or legal right to work, answer truthfully from candidate context and choose the closest matching option.",
-    "If a field asks for a cover letter, motivation letter, or supporting statement, write a concise truthful answer from candidate context and the listing.",
-    "Be concise, concrete, and truthful.",
-    "Use normal capitalization. Do not return answers in all caps unless the field explicitly requires an acronym or code.",
-    "For optional demographic, equal opportunity, race, ethnicity, gender, pronoun, disability, or veteran self-identification fields, choose the opt-out option when one exists.",
-    "For required demographic/self-identification choice fields, choose the available option equivalent to 'I do not wish to answer', 'Decline to self-identify', 'Prefer not to say', or 'I don't want to answer'.",
-    "For source/referral fields like 'How did you hear about this job?', answer exactly 'Google'.",
-    "For yes/no fields, answer exactly 'Yes' or 'No'.",
-    "For multi-select fields, return a comma-separated list of selected option labels.",
-    ...COMPENSATION_INSTRUCTIONS,
+      ? "Use the provided candidate context and attached resume PDF."
+      : "Use the provided candidate context.",
+    "Return exactly one answer per field key in Fields JSON.",
+    "Read each field label, type, and options literally.",
+    "Required fields must be non-empty.",
+    "For select, radio, and checkbox fields, return the exact text of one listed option.",
     "Return valid JSON only with shape {\"answers\":[{\"key\":\"\",\"label\":\"\",\"answer\":\"\",\"reasoning\":\"\"}]}.",
     `Candidate context: ${params.contextBlock}`,
     `Job listing text: ${params.listingText.slice(0, 8000)}`,

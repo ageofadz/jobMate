@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "JobMate",
-  "version": "1.0.7",
+  "version": "1.0.15",
   "description": "Agentic browser assistant. Give it tasks, it figures out the rest.",
   "action": {
     "default_popup": "popup.html",
@@ -10,7 +10,7 @@
   "side_panel": {
     "default_path": "sidepanel.html"
   },
-  "permissions": ["tabs", "scripting", "storage", "unlimitedStorage", "tabGroups", "sidePanel", "debugger"],
+  "permissions": ["tabs", "scripting", "storage", "unlimitedStorage", "tabGroups", "sidePanel", "debugger", "downloads"],
   "host_permissions": ["<all_urls>", "http://localhost/*", "http://127.0.0.1/*", "https://localhost/*", "https://127.0.0.1/*", "https://job-mate-theta.vercel.app/*", "https://www.google.com/*"],
   "background": {
     "service_worker": "background.js"

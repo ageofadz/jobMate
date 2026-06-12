@@ -19,6 +19,13 @@
     });
   }
 
+  let applySessionTargetUrl = "";
+  let hasLeftTargetListing = false;
+
+  function getApplyAnchors(hiddenApplyUrl) {
+    return [applySessionTargetUrl, hiddenApplyUrl].filter(Boolean);
+  }
+
   async function resolvePayloadUrl() {
     const sessionId = hash.get("jobmateSession");
     if (sessionId) {
@@ -69,7 +76,11 @@
   let forcedInterrupt = null;
 
   let elementRegistry = new Map();
-  let elemSeq = 0;
+  let cachedInteractiveActions = [];
+  let cachedApplyAdvancingIds = [];
+  let cachedPreApplyPhase = false;
+  let cachedAuthGatePhase = false;
+  let cachedClickLayout = null;
 
   function extractHiddenApplyUrl() {
     const chunks = [];
@@ -182,25 +193,162 @@
     }
   }
 
-  function navigateNow(href) {
+  function isBlockedApplyAction(node, href, hiddenApplyUrl) {
+    if (!href || !applySessionTargetUrl) return false;
+    const anchors = getApplyAnchors(hiddenApplyUrl);
+    if (hasLeftTargetListing && isReturnToListingUrl(href, applySessionTargetUrl, location.href)) {
+      return true;
+    }
+    if (applySessionTargetUrl && isOffTargetJobUrl(href, anchors, location.href)) {
+      return true;
+    }
+    return false;
+  }
+
+  function navigateNow(href, hiddenApplyUrl) {
     if (!href || normalizeHref(href) === normalizeHref(location.href)) {
       return false;
     }
-    if (isForbiddenNavigationUrl(href, location.href)) {
-      return false;
+    if (applySessionTargetUrl) {
+      const anchors = getApplyAnchors(hiddenApplyUrl ?? extractHiddenApplyUrl());
+      if (hasLeftTargetListing && isReturnToListingUrl(href, applySessionTargetUrl, location.href)) {
+        return false;
+      }
+      if (isOffTargetJobUrl(href, anchors, location.href)) {
+        return false;
+      }
     }
     location.assign(href);
     return true;
   }
 
-  async function activateElement(payloadUrl, elementId, elements, actionMeta) {
-    const node = nodeByElementId(elementId);
-    if (!node) return false;
+  function assertApplyIntent(elementId, action) {
+    if (!cachedPreApplyPhase && !cachedAuthGatePhase) return true;
+    if (action?.coords || action?.ocrBlock) return true;
+    if (!elementId) return true;
+    if (action?.tool === "navigate") return true;
+    if (!cachedApplyAdvancingIds.length) return true;
+    return cachedApplyAdvancingIds.includes(elementId);
+  }
 
-    const elemEntry = elements.find((e) => e.elementId === elementId);
-    const elemHref = elemEntry?.href || resolveHref(node) || "";
-    const elemText = elemEntry?.text || clean(node.textContent || "");
-    if (elemHref && isForbiddenNavigationUrl(elemHref, location.href)) {
+  function backendNodeIdFromElementId(elementId) {
+    const raw = String(elementId || "");
+    if (!raw.startsWith("ax_")) return null;
+    const parsed = Number(raw.slice(3));
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  }
+
+  async function clickViaCdp(elementId, elemEntry) {
+    const backendNodeId = elemEntry?.backendNodeId ?? backendNodeIdFromElementId(elementId);
+    if (!backendNodeId) return null;
+    return extensionMessage({ type: "JOBMATE_CDP_CLICK", backendNodeId, elementId });
+  }
+
+  function blockCenterClientPoint(ocrBlock) {
+    const nx = (Number(ocrBlock.x0) + Number(ocrBlock.x1)) / 2;
+    const ny = (Number(ocrBlock.y0) + Number(ocrBlock.y1)) / 2;
+    return normPointToClient(nx, ny);
+  }
+
+  function normPointToClient(nx, ny) {
+    const layout = cachedClickLayout;
+    const vw = layout?.viewportWidth > 0 ? layout.viewportWidth : window.innerWidth;
+    const vh = layout?.viewportHeight > 0 ? layout.viewportHeight : window.innerHeight;
+    const x = (nx / 1000) * vw;
+    const y = (ny / 1000) * vh;
+    return { x, y };
+  }
+
+  function normCoordsToClient(coords, ocrBlock) {
+    if (ocrBlock) return blockCenterClientPoint(ocrBlock);
+    return normPointToClient(Number(coords.x), Number(coords.y));
+  }
+
+  function showVirtualMouse(x, y) {
+    const ring = document.createElement("div");
+    ring.setAttribute("data-jobmate-virtual-mouse", "1");
+    Object.assign(ring.style, {
+      position: "fixed",
+      left: `${x - 12}px`,
+      top: `${y - 12}px`,
+      width: "24px",
+      height: "24px",
+      borderRadius: "50%",
+      border: "2px solid #fff",
+      background: "rgba(255, 59, 48, 0.75)",
+      boxShadow: "0 0 12px rgba(255, 59, 48, 0.6)",
+      zIndex: "2147483647",
+      pointerEvents: "none",
+      transition: "transform 0.15s ease, opacity 0.35s ease"
+    });
+    document.documentElement.appendChild(ring);
+    requestAnimationFrame(() => {
+      ring.style.transform = "scale(0.65)";
+      ring.style.opacity = "0.85";
+    });
+    setTimeout(() => {
+      ring.style.opacity = "0";
+      setTimeout(() => ring.remove(), 350);
+    }, 450);
+  }
+
+  async function clickViaCoords(coords, ocrBlock) {
+    if (!coords && !ocrBlock) return null;
+    if (coords && (!Number.isFinite(Number(coords.x)) || !Number.isFinite(Number(coords.y))) && !ocrBlock) {
+      return null;
+    }
+    if (cachedClickLayout && Number.isFinite(Number(cachedClickLayout.scrollX)) && Number.isFinite(Number(cachedClickLayout.scrollY))) {
+      window.scrollTo(Number(cachedClickLayout.scrollX), Number(cachedClickLayout.scrollY));
+      await sleep(50);
+    }
+    const { x, y } = normCoordsToClient(coords, ocrBlock);
+    if (isFileUploadPoint(x, y)) {
+      return { ok: false, error: "file_upload_target" };
+    }
+    showVirtualMouse(x, y);
+    await sleep(80);
+    const cdp = await extensionMessage({
+      type: "JOBMATE_COORD_CLICK",
+      coords,
+      clientX: x,
+      clientY: y,
+      viewport: { width: window.innerWidth, height: window.innerHeight }
+    });
+    if (!cdp?.ok) return { ok: false, error: cdp?.error || "cdp_click_failed" };
+    return { ok: true, x, y };
+  }
+
+  async function activateElement(payloadUrl, elementId, elements, actionMeta) {
+    if (actionMeta.action?.coords || actionMeta.action?.ocrBlock) {
+      if (!assertApplyIntent(null, actionMeta.action)) {
+        return false;
+      }
+      const coordLabel = actionMeta.action.ocrBlock
+        ? `ocr "${String(actionMeta.action.ocrBlock.text || "").slice(0, 40)}"`
+        : `coord ${actionMeta.action.coords.x},${actionMeta.action.coords.y}`;
+      statusPanel(actionMeta.step, actionMeta.maxSteps, {
+        ...actionMeta.action,
+        elementId: coordLabel
+      });
+      const coordClick = await clickViaCoords(actionMeta.action.coords, actionMeta.action.ocrBlock);
+      if (coordClick?.ok) {
+        await sleep(400);
+        return true;
+      }
+      return false;
+    }
+
+    if (!assertApplyIntent(elementId, actionMeta.action)) {
+      return false;
+    }
+
+    const elemEntry =
+      elements.find((e) => e.elementId === elementId) ||
+      cachedInteractiveActions.find((e) => e.elementId === elementId);
+    const node = nodeByElementId(elementId);
+    const elemHref = elemEntry?.href || elemEntry?.url || (node ? resolveHref(node) : "") || "";
+    const elemText = elemEntry?.text || elemEntry?.name || (node ? clean(node.textContent || "") : "");
+    if (elemHref && applySessionTargetUrl && isBlockedApplyAction(null, elemHref, extractHiddenApplyUrl())) {
       return false;
     }
     statusPanel(actionMeta.step, actionMeta.maxSteps, {
@@ -208,27 +356,67 @@
       elementId: `${elementId} "${elemText.slice(0, 40)}"`
     });
 
-    const href = resolveHref(node) || elemEntry?.href || null;
-    if (href) {
-      if (node.tagName === "A") node.setAttribute("target", "_self");
-      if (navigateNow(href)) return "navigated";
+    const anchors = getApplyAnchors(extractHiddenApplyUrl());
+    const stemChildUrl =
+      actionMeta.action?.url ||
+      (elemHref ? resolveActionUrl(elemHref, location.href) : "");
+    if (stemChildUrl && isStemChildApplyPath(stemChildUrl, anchors, location.href)) {
+      if (navigateNow(stemChildUrl, extractHiddenApplyUrl())) return "navigated";
     }
 
-    if (isSubmitLike(node, actionMeta.action)) {
+    const cdpClick = await clickViaCdp(elementId, elemEntry);
+    if (cdpClick?.ok) {
+      const href = cdpClick.href || elemHref || null;
+      if (href && navigateNow(href, extractHiddenApplyUrl())) return "navigated";
+      await sleep(300);
+      return true;
+    }
+
+    if (!node) return false;
+
+    if (actionMeta.action?.value && (node.tagName === "SELECT" || node.getAttribute("role") === "combobox" || node.getAttribute("role") === "listbox")) {
+      await fillDropdownField(
+        { node, field: { type: "select", label: elemText || nearbyLabel(node) } },
+        actionMeta.action.value
+      );
+      await sleep(300);
+      return true;
+    }
+
+    const href = resolveHref(node) || elemHref || null;
+    if (href) {
+      if (node.tagName === "A") node.setAttribute("target", "_self");
+      if (navigateNow(href, extractHiddenApplyUrl())) return "navigated";
+    }
+
+    if (actionMeta.action?.tool === "submit" || String(node.type || node.getAttribute("type") || "").toLowerCase() === "submit") {
       submitViaEnter(node);
       await sleep(300);
+      return true;
     }
 
     if (opensFileChooser(node)) {
       return false;
     }
 
-    await aggressiveClick(node);
+    try {
+      node.scrollIntoView({ block: "center", inline: "center" });
+      node.focus();
+      node.click();
+    } catch {
+      return false;
+    }
+    await sleep(300);
     return true;
   }
 
   function nodeByElementId(elementId) {
-    return elementRegistry.get(elementId) || null;
+    if (elementRegistry.has(elementId)) return elementRegistry.get(elementId);
+    if (!String(elementId || "").startsWith("ax_")) return null;
+    const action = cachedInteractiveActions.find((a) => a.elementId === elementId);
+    const node = findDomNodeForA11yAction(action);
+    if (node) elementRegistry.set(elementId, node);
+    return node || null;
   }
 
   async function waitForPageLoad() {
@@ -269,6 +457,10 @@
         .join(" ")
     );
     if (attrs) return attrs.slice(0, 120);
+    for (const img of node.querySelectorAll?.("img[alt]") || []) {
+      const alt = clean(img.getAttribute("alt") || "");
+      if (alt) return alt.slice(0, 120);
+    }
     const own = clean(
       Array.from(node.childNodes)
         .map((n) => {
@@ -282,83 +474,177 @@
     return clean(node.textContent || "").slice(0, 120);
   }
 
-  function isLikelyPointerClickable(node) {
-    if (node.closest('button, a[href], [role="button"], [role="link"], input[type="button"], input[type="submit"]')) {
-      return false;
+  function axRoleSelectors(role) {
+    switch (String(role || "").toLowerCase()) {
+      case "link":
+        return 'a, [role="link"]';
+      case "button":
+        return 'button, [role="button"], input[type="button"], input[type="submit"]';
+      case "tab":
+        return '[role="tab"]';
+      case "menuitem":
+        return '[role="menuitem"]';
+      case "menuitemcheckbox":
+        return '[role="menuitemcheckbox"]';
+      case "menuitemradio":
+        return '[role="menuitemradio"]';
+      default:
+        return `[role="${role}"]`;
     }
-    const tag = node.tagName;
-    if (!["DIV", "SPAN", "LI", "P", "LABEL", "TD", "TH"].includes(tag)) return false;
-    if (!isActionRendered(node)) return false;
-    const style = window.getComputedStyle(node);
-    if (style.cursor !== "pointer") return false;
-    const rect = node.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0 || rect.width > 480 || rect.height > 120) return false;
-    const text = actionText(node);
-    return Boolean(text);
   }
 
-  function collectActionCandidates() {
-    const selector =
-      'button, a, [role="button"], [role="tab"], [role="link"], input[type="button"], input[type="submit"], [onclick], label[for]';
-    const seen = new Set();
-    const nodes = [];
+  function accessibleNameMatches(node, name) {
+    const a = norm(actionText(node));
+    const b = norm(name);
+    if (!a || !b) return false;
+    return a === b;
+  }
+
+  function hrefPathFromUrl(url) {
+    try {
+      return new URL(url, location.href).pathname;
+    } catch {
+      return "";
+    }
+  }
+
+  function findDomNodeForA11yAction(action) {
+    if (!action) return null;
+    const role = String(action.role || action.tag || "").toLowerCase();
+    const name = action.name || action.text || "";
+    const axUrl = action.url || action.href || "";
+    const selector = axRoleSelectors(role);
+    const candidates = [];
 
     for (const root of fieldRoots()) {
       for (const node of queryDeep(selector, root)) {
-        if (seen.has(node)) continue;
-        seen.add(node);
-        nodes.push(node);
+        if (!isActionRendered(node)) continue;
+        if (opensFileChooser(node)) continue;
+        if (!accessibleNameMatches(node, name)) continue;
+
+        const href = resolveHref(node) || node.getAttribute("href") || "";
+        if (href && applySessionTargetUrl && isBlockedApplyAction(node, href, extractHiddenApplyUrl())) continue;
+
+        if (role === "link" && axUrl) {
+          const nodeHref = href || axUrl;
+          try {
+            const nodeResolved = normalizeHref(new URL(nodeHref, location.href).toString());
+            const axResolved = normalizeHref(new URL(axUrl, location.href).toString());
+            if (nodeResolved !== axResolved && hrefPathFromUrl(href) !== hrefPathFromUrl(axUrl)) continue;
+          } catch {
+            continue;
+          }
+        }
+
+        candidates.push(node);
       }
     }
 
+    return candidates.find((node) => !candidates.some((other) => other !== node && node.contains(other))) || null;
+  }
+
+  async function forcePageRescan(hiddenApplyUrl) {
+    const hidden = hiddenApplyUrl ?? extractHiddenApplyUrl();
+    await sleep(400);
+    const scrollTargets = [
+      0,
+      Math.floor(window.innerHeight * 0.5),
+      Math.max(0, document.documentElement.scrollHeight - window.innerHeight)
+    ];
+
+    for (const y of scrollTargets) {
+      window.scrollTo(0, y);
+      await sleep(250);
+    }
+
+    window.scrollTo(0, 0);
+    await sleep(300);
+
+    let best = collectPageElements(hidden);
+    const dialogSelector =
+      '[role="dialog"], [role="alertdialog"], dialog, .modal, [class*="modal"], [class*="dialog"], [aria-modal="true"]';
+
+    for (let w = 0; w < 8; w++) {
+      const current = collectPageElements(hidden);
+
+      if (
+        current.fieldItems.length > best.fieldItems.length ||
+        current.elements.length > best.elements.length
+      ) {
+        best = current;
+      }
+
+      if (best.fieldItems.length > 0) {
+        break;
+      }
+
+      if (document.querySelector(dialogSelector)) {
+        await sleep(400);
+        continue;
+      }
+
+      await sleep(300);
+    }
+
+    const rescanned = collectPageElements(hidden);
+
+    if (rescanned.elements.length > best.elements.length || rescanned.fieldItems.length > best.fieldItems.length) {
+      best = rescanned;
+    }
+
+    return best;
+  }
+
+  async function tryUpgradeWaitAction(step, history, hiddenApplyUrl, blockedElementIds) {
+    const rescan = await forcePageRescan(hiddenApplyUrl);
+
+    if (rescan.fieldItems.length > 0) {
+      return { rescanFields: true };
+    }
+
+    const retry = await callStep(step, history, hiddenApplyUrl, rescan.elements, blockedElementIds);
+
+    if (retry.tool === "wait") {
+      return {};
+    }
+
+    return { action: retry };
+  }
+
+  function collectDomActions(hiddenApplyUrl) {
+    const hidden = hiddenApplyUrl ?? extractHiddenApplyUrl();
+    const actions = [];
+    let actionSeq = 0;
+    const selectors = 'button, a[href], [role="button"], [role="link"], input[type="submit"], input[type="button"]';
     for (const root of fieldRoots()) {
-      for (const node of queryDeep("div, span, li, p, label, td, th", root)) {
-        if (seen.has(node)) continue;
-        if (!isLikelyPointerClickable(node)) continue;
-        seen.add(node);
-        nodes.push(node);
+      for (const node of queryDeep(selectors, root)) {
+        if (!isActionRendered(node)) continue;
+        if (opensFileChooser(node)) continue;
+        const text = actionText(node);
+        if (!text) continue;
+        const href = resolveHref(node) || "";
+        if (href && applySessionTargetUrl && isBlockedApplyAction(node, href, hidden)) continue;
+        const tag = node.tagName?.toLowerCase() || String(node.getAttribute("role") || "button").toLowerCase();
+        actionSeq += 1;
+        const elementId = `dom_${actionSeq}`;
+        elementRegistry.set(elementId, node);
+        actions.push({
+          elementId,
+          type: "action",
+          tag,
+          role: node.getAttribute("role") || tag,
+          text,
+          href,
+          name: text
+        });
       }
     }
-
-    return nodes.filter((node) => !nodes.some((other) => other !== node && node.contains(other)));
+    return actions;
   }
 
   function collectPageElements(hiddenApplyUrl) {
     elementRegistry = new Map();
-    elemSeq = 0;
     const elements = [];
-
-    for (const node of collectActionCandidates()) {
-      if (!isActionRendered(node)) continue;
-      if (opensFileChooser(node)) continue;
-      if (node.tagName === "A") {
-        const hrefAttr = node.getAttribute("href") || "";
-        if (hrefAttr.startsWith("javascript:") && !node.getAttribute("onclick") && node.getAttribute("role") !== "button") {
-          continue;
-        }
-      }
-
-      const text = actionText(node);
-      if (!text) continue;
-
-      let href = resolveHref(node) || "";
-      if (href && isForbiddenNavigationUrl(href, location.href)) continue;
-
-      const elementId = `el_${elemSeq++}`;
-      node.dataset.jobmateElementId = elementId;
-      elementRegistry.set(elementId, node);
-
-      const card = node.closest("article, li, tr, section, form, main") || node.parentElement;
-      elements.push({
-        elementId,
-        type: "action",
-        tag: node.tagName.toLowerCase(),
-        text,
-        href,
-        disabled: Boolean(node.disabled || node.getAttribute("aria-disabled") === "true"),
-        context: clean(card?.textContent || "").slice(0, 300)
-      });
-    }
 
     const fieldItems = controls();
     for (const item of fieldItems) {
@@ -374,6 +660,8 @@
         options: item.field.options
       });
     }
+
+    elements.push(...collectDomActions(hiddenApplyUrl));
 
     return { elements, fieldItems };
   }
@@ -393,11 +681,27 @@
       stepIndex: step,
       history,
       hiddenApplyUrl: hiddenApplyUrl || null,
+      hasLeftTargetListing,
       elements,
       blockedElementIds: [...blockedElementIds],
-      overlayMap: []
+      overlayMap: [],
+      viewport: {
+        width: window.innerWidth,
+        height: window.innerHeight,
+        scrollX: window.scrollX,
+        scrollY: window.scrollY
+      }
     });
     if (!reply?.ok) throw new Error(reply?.error || "Analyze failed.");
+    if (Array.isArray(reply.interactiveActions)) {
+      cachedInteractiveActions = reply.interactiveActions;
+    }
+    cachedApplyAdvancingIds = Array.isArray(reply.applyAdvancingIds) ? reply.applyAdvancingIds : [];
+    cachedPreApplyPhase = Boolean(reply.preApplyPhase);
+    cachedAuthGatePhase = Boolean(reply.authGatePhase);
+    if (reply.clickLayout && Number(reply.clickLayout.viewportWidth) > 0 && Number(reply.clickLayout.viewportHeight) > 0) {
+      cachedClickLayout = reply.clickLayout;
+    }
     return reply.action;
   }
 
@@ -456,31 +760,105 @@
     return out;
   }
 
+  function advanceTreeNode(node) {
+    if (!node) return null;
+    if (node.parentElement) return node.parentElement;
+    const root = node.getRootNode();
+    if (root instanceof ShadowRoot && root.host) return root.host;
+    return null;
+  }
+
+  function hostLabelAttr(node) {
+    let cursor = node;
+    for (let i = 0; i < 8; i++) {
+      if (!cursor || cursor.nodeType !== Node.ELEMENT_NODE) break;
+      const attr = cursor.getAttribute("label");
+      if (attr) return clean(attr);
+      cursor = advanceTreeNode(cursor);
+    }
+    return "";
+  }
+
+  function hostContextAttr(node) {
+    const parts = [];
+    let cursor = node;
+    for (let i = 0; i < 8; i++) {
+      if (!cursor || cursor.nodeType !== Node.ELEMENT_NODE) break;
+      const tag = cursor.tagName ? cursor.tagName.toLowerCase() : "";
+      const dataTest = cursor.getAttribute("data-test");
+      const aria = cursor.getAttribute("aria-label");
+      const name = cursor.getAttribute("name");
+      const accept = cursor.getAttribute("accept");
+      if (tag && tag.split("-").length > 1) parts.push(tag);
+      if (dataTest) parts.push(dataTest);
+      if (aria) parts.push(clean(aria));
+      if (name) parts.push(name);
+      if (accept) parts.push(`accept entries: ${accept.split(",").filter(Boolean).length}`);
+      cursor = advanceTreeNode(cursor);
+    }
+    return [...new Set(parts.filter(Boolean))].slice(0, 8).join(" · ").slice(0, 260);
+  }
+
+  function headingInScope(scope) {
+    if (!scope || scope.nodeType !== Node.ELEMENT_NODE) return "";
+    for (const sel of ["h1", "h2", "h3", "h4", "legend", "spl-typography-title"]) {
+      for (const node of queryDeep(sel, scope)) {
+        const text = clean(node.textContent || "");
+        if (text.length > 1 && text.length < 120) return text;
+      }
+    }
+    return "";
+  }
+
+  function fieldContext(node) {
+    const parts = [];
+    let cursor = node;
+    for (let depth = 0; cursor && depth < 12; depth++) {
+      const heading = headingInScope(cursor);
+      if (heading) parts.push(heading);
+      const hostLabel = cursor.getAttribute?.("label");
+      if (hostLabel) parts.push(clean(hostLabel));
+      cursor = advanceTreeNode(cursor);
+    }
+    const hostContext = hostContextAttr(node);
+    if (hostContext) parts.push(hostContext);
+    return [...new Set(parts.filter(Boolean))].slice(0, 5).join(" · ").slice(0, 260);
+  }
+
   function labelledText(node) {
+    const hostLabel = hostLabelAttr(node);
     const id = node.getAttribute("id");
-    const byFor = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
+    const scope = scopeForNode(node);
+    const byFor = id ? scope.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
     const wrap = node.closest("label");
     const aria = node.getAttribute("aria-label");
     const labelledBy = clean(
       (node.getAttribute("aria-labelledby") || "")
         .split(/\s+/)
-        .map((lid) => document.getElementById(lid)?.textContent || "")
+        .map((lid) => scope.getElementById?.(lid)?.textContent || document.getElementById(lid)?.textContent || "")
         .join(" ")
     );
-    return clean(byFor?.textContent || wrap?.textContent || aria || labelledBy || "");
+    return clean(hostLabel || byFor?.textContent || wrap?.textContent || aria || labelledBy || "");
   }
 
   function nearbyLabel(node) {
     const direct = labelledText(node);
     if (direct && direct.length > 2 && !["yes", "no", "true", "false", "type your response", "select"].includes(direct.toLowerCase())) {
+      const context = fieldContext(node);
+      if (context && node?.tagName === "INPUT" && String(node.type || "").toLowerCase() === "file") {
+        return `${direct} — ${context}`.slice(0, 260);
+      }
       return direct;
     }
-    let cursor = node.parentElement;
-    for (let depth = 0; cursor && depth < 7; depth++) {
-      const legend = cursor.querySelector("legend");
-      const label = cursor.querySelector("label, [class*='label'], [class*='question'], h1, h2, h3, h4, p");
+    let cursor = advanceTreeNode(node);
+    let bestHeading = "";
+    for (let depth = 0; cursor && depth < 12; depth++) {
+      const heading = headingInScope(cursor);
+      if (heading && !bestHeading) bestHeading = heading;
+      const legend = cursor.querySelector?.("legend");
+      const label = cursor.querySelector?.("label, [class*='label'], [class*='question'], h1, h2, h3, h4, p");
       const text = clean(legend?.textContent || label?.textContent || cursor.textContent || "");
-      const options = Array.from(cursor.querySelectorAll("input[type='radio'], input[type='checkbox']"))
+      const options = Array.from(cursor.querySelectorAll?.("input[type='radio'], input[type='checkbox']") || [])
         .map((item) => labelledText(item) || item.value).filter(Boolean);
       let candidate = text;
       for (const option of options) {
@@ -488,11 +866,27 @@
       }
       candidate = clean(candidate.replace(/[✱*]/g, " "));
       if (candidate.length > 2 && !["yes", "no", "true", "false"].includes(candidate.toLowerCase())) {
-        return candidate.slice(0, 260);
+        if (bestHeading && candidate.length > bestHeading.length * 2) {
+          cursor = advanceTreeNode(cursor);
+          continue;
+        }
+        if (bestHeading) return bestHeading.slice(0, 260);
+        if (candidate.length <= 120) return candidate.slice(0, 260);
       }
-      cursor = cursor.parentElement;
+      cursor = advanceTreeNode(cursor);
     }
+    if (bestHeading) return bestHeading.slice(0, 260);
     return direct || node.getAttribute("name") || node.getAttribute("id") || node.getAttribute("placeholder") || "Field";
+  }
+
+  function isRendered(node) {
+    if (!node.isConnected) return false;
+    const rect = node.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) return false;
+    const style = window.getComputedStyle(node);
+    if (style.display === "none" || style.visibility === "hidden") return false;
+    if (node.getAttribute("aria-hidden") === "true") return false;
+    return true;
   }
 
   function groupOptions(node, type) {
@@ -501,6 +895,50 @@
       ? Array.from(document.querySelectorAll(`input[type="${type}"][name="${CSS.escape(name)}"]`))
       : [node];
     return group.map((item) => labelledText(item) || item.value).filter(Boolean);
+  }
+
+  function nodeScope(node) {
+    const root = node.getRootNode();
+    return root instanceof Document || root instanceof ShadowRoot ? root : document;
+  }
+
+  function structurallyNeedsSuggestionPick(node) {
+    if (!node || node.nodeType !== Node.ELEMENT_NODE) return false;
+    const role = String(node.getAttribute("role") || "").toLowerCase();
+    if (role === "combobox") return true;
+    const ariaAutocomplete = String(node.getAttribute("aria-autocomplete") || "").toLowerCase();
+    if (ariaAutocomplete && ariaAutocomplete !== "none") return true;
+    const listAttr = node.getAttribute("list");
+    if (listAttr) {
+      const scope = nodeScope(node);
+      const dataList = scope.getElementById(listAttr) || scope.querySelector(`#${CSS.escape(listAttr)}`);
+      if (dataList?.tagName === "DATALIST") return true;
+    }
+    const popupId = node.getAttribute("aria-controls") || node.getAttribute("aria-owns") || "";
+    if (popupId) {
+      const scope = nodeScope(node);
+      const popup = scope.getElementById(popupId) || document.getElementById(popupId);
+      if (popup && String(popup.getAttribute("role") || "").toLowerCase() === "listbox") return true;
+    }
+    let cursor = node.parentElement;
+    for (let depth = 0; depth < 6 && cursor; depth++) {
+      if (String(cursor.getAttribute("role") || "").toLowerCase() === "combobox") return true;
+      if (cursor.parentElement) {
+        cursor = cursor.parentElement;
+      } else {
+        const root = cursor.getRootNode();
+        cursor = root instanceof ShadowRoot ? root.host : null;
+      }
+    }
+    return false;
+  }
+
+  function resolveFieldKind(node, type, tag) {
+    if (tag === "select" || type === "select") return "select";
+    if (type === "file") return "file";
+    if (type === "radio" || type === "checkbox") return type;
+    if (structurallyNeedsSuggestionPick(node)) return "suggestion";
+    return "text";
   }
 
   function controls() {
@@ -522,6 +960,9 @@
       fieldSeq++;
       node.dataset.jobmateFieldId = fieldId;
       const lab = nearbyLabel(node);
+      const ctx = fieldContext(node);
+      const fieldKind = resolveFieldKind(node, type, tag);
+      const needsSuggestionPick = fieldKind === "suggestion";
 
       items.push({
         node,
@@ -529,27 +970,23 @@
           fieldId,
           key,
           label: lab,
+          context: ctx,
           type,
+          fieldKind,
+          needsSuggestionPick,
+          autocomplete: needsSuggestionPick,
           required:
             (node.required === true || String(node.getAttribute("aria-required") || "") === "true") ||
             /[✱*]|required/i.test(lab),
-          options: tag === "select"
+          options: node.tagName === "SELECT"
             ? Array.from(node.options).map((opt) => clean(opt.label || opt.text || opt.value)).filter(Boolean)
             : type === "radio" || type === "checkbox"
               ? groupOptions(node, type)
-              : []
+              : type === "select"
+                ? Array.from(node.querySelectorAll('[role="option"]')).map((opt) => clean(opt.textContent || "")).filter(Boolean)
+                : []
         }
       });
-    }
-
-    function isRendered(node) {
-      if (!node.isConnected) return false;
-      const rect = node.getBoundingClientRect();
-      if (rect.width === 0 && rect.height === 0) return false;
-      const style = window.getComputedStyle(node);
-      if (style.display === "none" || style.visibility === "hidden") return false;
-      if (node.getAttribute("aria-hidden") === "true") return false;
-      return true;
     }
 
     function isCheckboxUsable(node) {
@@ -585,6 +1022,28 @@
         if (node.querySelector("input, textarea, select")) continue;
         if (!isRendered(node)) continue;
         pushField(node, "contenteditable", "div");
+      }
+    }
+
+    const ariaRoleTypeMap = {
+      checkbox: "checkbox",
+      radio: "radio",
+      switch: "checkbox",
+      textbox: "text",
+      spinbutton: "number",
+      combobox: "select",
+      listbox: "select"
+    };
+    const ariaRoleSelector = Object.keys(ariaRoleTypeMap).map((r) => `[role="${r}"]`).join(",");
+    const skipIfContainsNative = new Set(["combobox", "listbox", "textbox"]);
+
+    for (const root of fieldRoots()) {
+      for (const node of queryDeep(ariaRoleSelector, root)) {
+        if (["INPUT", "TEXTAREA", "SELECT"].includes(node.tagName)) continue;
+        const role = node.getAttribute("role");
+        if (skipIfContainsNative.has(role) && node.querySelector("input, textarea, select")) continue;
+        if (!isRendered(node)) continue;
+        pushField(node, ariaRoleTypeMap[role] || role, node.tagName.toLowerCase());
       }
     }
 
@@ -665,6 +1124,22 @@
     return Boolean(associatedFileInput(node));
   }
 
+  function isFileUploadNode(node) {
+    if (!node) return false;
+    if (node.tagName === "INPUT" && String(node.type || "").toLowerCase() === "file") return true;
+    if (associatedFileInput(node)) return true;
+    if (node.querySelector?.('input[type="file"]')) return true;
+    return false;
+  }
+
+  function isFileUploadPoint(x, y) {
+    for (const el of document.elementsFromPoint(x, y)) {
+      if (el.closest("[data-jobmate-virtual-mouse]") || el.closest("#jobmate-status")) continue;
+      if (isFileUploadNode(el)) return true;
+    }
+    return false;
+  }
+
   async function aggressiveClick(node) {
     if (opensFileChooser(node)) {
       return;
@@ -692,6 +1167,7 @@
     node.dispatchEvent(new PointerEvent("pointerup", evOpts));
     node.dispatchEvent(new MouseEvent("mouseup", evOpts));
     node.dispatchEvent(new MouseEvent("click", evOpts));
+    node.click();
 
     if (savedAriaHidden) node.setAttribute("aria-hidden", savedAriaHidden); else node.removeAttribute("aria-hidden");
     if (savedTabindex !== null) node.setAttribute("tabindex", savedTabindex); else node.removeAttribute("tabindex");
@@ -711,13 +1187,194 @@
     node.dispatchEvent(new Event("change", { bubbles: true }));
   }
 
+  function replaceFieldValue(node, text, label) {
+    const value = String(text ?? "");
+    if (!value) {
+      throw new Error(`Refusing to clear "${label || nearbyLabel(node) || "field"}".`);
+    }
+    setNativeValue(node, value);
+  }
+
+  async function focusField(node) {
+    if (!node?.isConnected) return;
+    try {
+      node.scrollIntoView({ block: "center", inline: "center" });
+    } catch { }
+    await aggressiveClick(node);
+    await sleep(120);
+    try {
+      node.focus();
+    } catch { }
+  }
+
+  function pickSelectOption(node, answer) {
+    const target = norm(answer);
+    for (const opt of node.options) {
+      const labels = [opt.label, opt.text, opt.value].map(norm).filter(Boolean);
+      if (labels.some((label) => label === target || label.includes(target) || target.includes(label))) {
+        return opt;
+      }
+    }
+    return null;
+  }
+
+  async function findAndClickOption(answer) {
+    const wanted = norm(answer);
+    if (!wanted) return false;
+    for (let round = 0; round < 4; round++) {
+      const options = queryDeep('[role="option"], [role="menuitem"], [role="menuitemradio"], li[aria-selected], spl-list-item', document);
+      for (const opt of options) {
+        if (!isRendered(opt)) continue;
+        const text = norm(opt.textContent || opt.getAttribute("aria-label") || "");
+        if (!text) continue;
+        if (text === wanted || text.includes(wanted) || wanted.includes(text)) {
+          await aggressiveClick(opt);
+          await sleep(150);
+          return true;
+        }
+      }
+      await sleep(200);
+    }
+    return false;
+  }
+
+  async function clickDropdownOptionViaOcr(answer, fieldLabel) {
+    const reply = await extensionMessage({
+      type: "JOBMATE_OCR_PICK_TEXT",
+      targetText: answer,
+      fieldLabel: fieldLabel || "",
+      viewport: {
+        width: window.innerWidth,
+        height: window.innerHeight,
+        scrollX: window.scrollX,
+        scrollY: window.scrollY
+      }
+    });
+    if (!reply?.ok || !reply.coords) return false;
+    if (reply.clickLayout) cachedClickLayout = reply.clickLayout;
+    const result = await clickViaCoords(reply.coords, reply.ocrBlock);
+    return Boolean(result?.ok);
+  }
+
+  async function collectVisibleSuggestionOptions() {
+    const options = [];
+    let index = 0;
+    for (const opt of queryDeep('[role="option"], [role="listbox"] li, li[aria-selected], [aria-selected="true"], [aria-selected="false"]', document)) {
+      if (!isRendered(opt)) continue;
+      const text = clean(opt.textContent || opt.getAttribute("aria-label") || "");
+      if (!text || text.length > 200) continue;
+      options.push({ index: index++, text: text.slice(0, 200), node: opt });
+    }
+    return options;
+  }
+
+  function suggestionFieldDiagnostics(item, node, answer, optionCount) {
+    return [
+      `No suggestions for "${item.field.label}".`,
+      `Role: ${node.getAttribute("role") || ""}`,
+      `Aria controls: ${node.getAttribute("aria-controls") || ""}`,
+      `Aria expanded: ${node.getAttribute("aria-expanded") || ""}`,
+      `Typed value: ${answer || ""}`,
+      `Option count: ${optionCount}`,
+      `Invalid: ${node.getAttribute("aria-invalid") || ""}`
+    ].join(" ");
+  }
+
+  async function waitForSuggestionState(node) {
+    let options = await collectVisibleSuggestionOptions();
+    for (let round = 0; round < 6 && !options.length; round++) {
+      const expanded = node.getAttribute("aria-expanded");
+      const active = node.getAttribute("aria-activedescendant");
+      if (expanded === "true" || active) break;
+      await sleep(150);
+      options = await collectVisibleSuggestionOptions();
+    }
+    return options;
+  }
+
+  async function commitAriaSuggestionField(item, answer, optionCount) {
+    const node = item.node;
+    if (!structurallyNeedsSuggestionPick(node)) {
+      throw new Error(suggestionFieldDiagnostics(item, node, answer, optionCount));
+    }
+    const keyReply = await extensionMessage({ type: "JOBMATE_CDP_DISPATCH_KEYS", keys: ["ArrowDown", "Enter"] });
+    if (!keyReply?.ok) {
+      throw new Error(keyReply?.error || `Could not commit suggestion for "${item.field.label}".`);
+    }
+    await sleep(300);
+    if (node.getAttribute("aria-invalid") === "true") {
+      throw new Error(`Validation failed for "${item.field.label}".`);
+    }
+  }
+
+  async function fillSuggestionField(item, answer) {
+    const node = item.node;
+    await focusField(node);
+    replaceFieldValue(node, answer, item.field.label);
+    await sleep(400);
+    let options = await waitForSuggestionState(node);
+    if (!options.length) {
+      await commitAriaSuggestionField(item, answer, options.length);
+      return;
+    }
+    const pickReply = await extensionMessage({
+      type: "JOBMATE_PICK_SUGGESTION_OPTION",
+      fieldLabel: item.field.label,
+      desiredAnswer: answer,
+      options: options.map(({ index, text }) => ({ index, text }))
+    });
+    if (!pickReply?.ok) {
+      throw new Error(pickReply?.error || `Could not pick suggestion for "${item.field.label}".`);
+    }
+    if (pickReply.manualEntry) {
+      const manualIdx = Number(pickReply.optionIndex);
+      const manualOpt = Number.isFinite(manualIdx)
+        ? options.find((option) => option.index === manualIdx)
+        : options[options.length - 1];
+      if (manualOpt) {
+        await aggressiveClick(manualOpt.node);
+        await sleep(200);
+      }
+      replaceFieldValue(node, answer, item.field.label);
+      await sleep(200);
+    } else if (!pickReply.typeAsFreeText) {
+      const idx = Number(pickReply.optionIndex);
+      const picked = options.find((option) => option.index === idx);
+      if (!picked) throw new Error(`Invalid suggestion index for "${item.field.label}".`);
+      await aggressiveClick(picked.node);
+      await sleep(200);
+    }
+    if (node.getAttribute("aria-invalid") === "true") {
+      throw new Error(`Validation failed for "${item.field.label}".`);
+    }
+  }
+
+  async function fillDropdownField(item, answer) {
+    const node = item.node;
+    if (node.tagName === "SELECT") {
+      await focusField(node);
+      const picked = pickSelectOption(node, answer);
+      if (!picked) throw new Error(`No matching option for "${item.field.label}".`);
+      node.value = picked.value;
+      node.dispatchEvent(new Event("input", { bubbles: true }));
+      node.dispatchEvent(new Event("change", { bubbles: true }));
+      return;
+    }
+    await focusField(node);
+    await sleep(200);
+    if (await findAndClickOption(answer)) return;
+    if (await clickDropdownOptionViaOcr(answer, item.field.label)) return;
+    throw new Error(`Could not select "${answer}" for "${item.field.label}".`);
+  }
+
+  async function fillTextField(node, answer) {
+    await focusField(node);
+    await typeText(node, answer);
+  }
+
   async function typeText(node, text) {
     node.focus();
-    setNativeValue(node, "");
-    for (const ch of text) {
-      setNativeValue(node, node.value + ch);
-      await sleep(8);
-    }
+    replaceFieldValue(node, text, nearbyLabel(node));
   }
 
   function isDemographicField(field) {
@@ -743,8 +1400,12 @@
     const node = item.node;
     const type = item.field.type;
     if (type === "file") return false;
-    if (type === "checkbox") return !node.checked;
+    if (type === "checkbox") {
+      if (node.tagName === "INPUT") return !node.checked;
+      return node.getAttribute("aria-checked") !== "true";
+    }
     if (type === "radio") {
+      if (node.tagName !== "INPUT") return node.getAttribute("aria-checked") !== "true";
       const name = node.getAttribute("name");
       const group = name
         ? Array.from(document.querySelectorAll(`input[type="radio"][name="${CSS.escape(name)}"]`))
@@ -759,10 +1420,14 @@
       return !label || label === "select" || label === "choose" || label === "please select";
     }
     if (type === "contenteditable") return !clean(node.textContent || "");
+    if (!["INPUT", "TEXTAREA", "SELECT"].includes(node.tagName)) return !clean(node.textContent || "");
     return !String(node.value ?? "").trim();
   }
 
   function choiceClickTarget(input) {
+    if (!["INPUT", "TEXTAREA", "SELECT", "BUTTON"].includes(input.tagName)) {
+      return input;
+    }
     const id = input.id;
     if (id) {
       const linked = document.querySelector(`label[for="${CSS.escape(id)}"]`);
@@ -770,25 +1435,37 @@
     }
     const wrapped = input.closest("label");
     if (wrapped) return wrapped;
-    const parent = input.parentElement;
-    if (parent) {
-      const siblingLabel = parent.querySelector("label, span, div");
-      if (siblingLabel && siblingLabel !== input && isRendered(siblingLabel)) return siblingLabel;
-    }
     return input;
+  }
+
+  function nativeSetChecked(input, checked) {
+    if (input.tagName === "INPUT") {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "checked")?.set;
+      if (setter) {
+        setter.call(input, checked);
+      } else {
+        input.checked = checked;
+      }
+    }
+    if (input.getAttribute("role") === "checkbox" || input.getAttribute("role") === "radio") {
+      input.setAttribute("aria-checked", checked ? "true" : "false");
+    }
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
   }
 
   async function activateChoice(input, checked) {
     const target = choiceClickTarget(input);
     await aggressiveClick(target);
-    if (checked !== undefined) {
-      input.checked = checked;
-      if (input.getAttribute("role") === "checkbox" || input.getAttribute("role") === "radio") {
-        input.setAttribute("aria-checked", checked ? "true" : "false");
-      }
+    const role = input.getAttribute("role");
+    if (role === "checkbox" || role === "radio" || role === "switch") {
+      const kbOpts = { bubbles: true, cancelable: true, key: " ", code: "Space", keyCode: 32 };
+      input.dispatchEvent(new KeyboardEvent("keydown", kbOpts));
+      input.dispatchEvent(new KeyboardEvent("keyup", kbOpts));
     }
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    input.dispatchEvent(new Event("change", { bubbles: true }));
+    if (checked !== undefined) {
+      nativeSetChecked(input, checked);
+    }
   }
 
   async function choose(node, answer, multi) {
@@ -814,27 +1491,11 @@
     }
   }
 
-  function fillSelect(node, answer) {
-    const target = norm(answer);
-    let picked = null;
-    for (const opt of node.options) {
-      const labels = [opt.label, opt.text, opt.value].map(norm).filter(Boolean);
-      if (labels.some((label) => label === target || label.includes(target) || target.includes(label))) {
-        picked = opt;
-        break;
-      }
-    }
-    node.focus();
-    node.value = picked?.value || answer;
-    node.dispatchEvent(new Event("input", { bubbles: true }));
-    node.dispatchEvent(new Event("change", { bubbles: true }));
-  }
-
   async function checkNonDemographicCheckboxes(fieldItems) {
     for (const item of fieldItems) {
       if (item.field.type !== "checkbox") continue;
       if (isDemographicField(item.field)) continue;
-      if (item.node.checked) continue;
+      if (!fieldLooksEmpty(item)) continue;
       item.node.focus();
       await activateChoice(item.node, true);
     }
@@ -907,17 +1568,21 @@
       const fieldId = input.dataset.jobmateFieldId || `jm_${fieldSeq}_${key.replace(/[^a-zA-Z0-9_-]+/g, "_").slice(0, 60)}`;
       fieldSeq += 1;
       input.dataset.jobmateFieldId = fieldId;
+      const fileLabel = nearbyLabel(input);
       items.push({
         node: input,
         field: {
           fieldId,
           key,
-          label: nearbyLabel(input),
+          label: fileLabel,
+          context: fieldContext(input),
           type: "file",
+          fieldKind: "file",
+          needsSuggestionPick: false,
           required:
             input.required === true ||
             String(input.getAttribute("aria-required") || "") === "true" ||
-            /[✱*]|required/i.test(nearbyLabel(input)),
+            /[✱*]|required/i.test(fileLabel),
           options: []
         }
       });
@@ -957,128 +1622,125 @@
     const text = clean(section?.textContent || "").slice(0, 800).toLowerCase();
     const uploadName = String(payload?.resumeUpload?.name || "").trim().toLowerCase();
     if (uploadName && text.includes(uploadName)) return true;
-    if (text.includes(".pdf") && isResumeLabel(nearbyLabel(input))) return true;
     return false;
   }
 
-  function setInputFiles(input, fileList) {
-    const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "files");
-
-    if (descriptor?.set) {
-      descriptor.set.call(input, fileList);
-      return;
+  function shadowPiercingClosest(node, selector) {
+    let current = node;
+    while (current) {
+      if (current.matches && current.matches(selector)) return current;
+      if (current.parentElement) {
+        current = current.parentElement;
+      } else if (current.parentNode && current.parentNode.host) {
+        current = current.parentNode.host;
+      } else {
+        break;
+      }
     }
-
-    input.files = fileList;
+    return null;
   }
 
-  async function forceAttachResumeToInput(input, file) {
-    const saved = {
-      type: input.type,
-      hidden: input.hidden,
-      disabled: input.disabled,
-      style: {
-        display: input.style.display,
-        visibility: input.style.visibility,
-        opacity: input.style.opacity,
-        position: input.style.position,
-        width: input.style.width,
-        height: input.style.height,
-        left: input.style.left,
-        top: input.style.top,
-        pointerEvents: input.style.pointerEvents
-      },
-      attrs: {
-        hidden: input.getAttribute("hidden"),
-        ariaHidden: input.getAttribute("aria-hidden"),
-        tabIndex: input.getAttribute("tabindex")
-      }
-    };
-
-    function restoreInput() {
-      input.type = saved.type;
-      input.hidden = saved.hidden;
-      input.disabled = saved.disabled;
-      for (const [key, value] of Object.entries(saved.style)) {
-        input.style[key] = value;
-      }
-      if (saved.attrs.hidden === null) input.removeAttribute("hidden");
-      else input.setAttribute("hidden", saved.attrs.hidden);
-      if (saved.attrs.ariaHidden === null) input.removeAttribute("aria-hidden");
-      else input.setAttribute("aria-hidden", saved.attrs.ariaHidden);
-      if (saved.attrs.tabIndex === null) input.removeAttribute("tabindex");
-      else input.setAttribute("tabindex", saved.attrs.tabIndex);
-    }
-
-    function prepareInput() {
-      if (input.type !== "file") input.type = "file";
-      input.hidden = false;
-      input.disabled = false;
-      input.removeAttribute("hidden");
-      input.removeAttribute("aria-hidden");
-      input.style.display = "block";
-      input.style.visibility = "visible";
-      input.style.opacity = "0.01";
-      input.style.position = "fixed";
-      input.style.left = "0";
-      input.style.top = "0";
-      input.style.width = "4px";
-      input.style.height = "4px";
-      input.style.pointerEvents = "auto";
-      input.tabIndex = 0;
-    }
-
-    function dispatchFileEvents(target) {
-      target.dispatchEvent(new Event("focus", { bubbles: true }));
-      target.dispatchEvent(new Event("input", { bubbles: true }));
-      target.dispatchEvent(new Event("change", { bubbles: true }));
-      target.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true }));
-      target.dispatchEvent(new Event("blur", { bubbles: true }));
-    }
-
-    async function assignFiles(target) {
-      const transfer = new DataTransfer();
-      transfer.items.add(file);
-      setInputFiles(target, transfer.files);
-      dispatchFileEvents(target);
-    }
-
-    async function tryDrop(target) {
-      const transfer = new DataTransfer();
-      transfer.items.add(file);
-      const zone = target.closest(
-        "label, [role='button'], button, [class*='upload'], [class*='drop'], [class*='file'], [class*='File'], form, section, div"
-      ) || target;
-      zone.dispatchEvent(new DragEvent("dragenter", { bubbles: true, cancelable: true, dataTransfer: transfer }));
-      zone.dispatchEvent(new DragEvent("dragover", { bubbles: true, cancelable: true, dataTransfer: transfer }));
-      zone.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }));
-      await assignFiles(target);
-    }
-
-    const attempts = [
-      async () => {
-        prepareInput();
-        input.focus();
-        await assignFiles(input);
-      },
-      async () => {
-        prepareInput();
-        await tryDrop(input);
-      }
+  function findDropZone(target) {
+    const uploadSelectors = [
+      "[class*='upload']", "[class*='drop']", "[class*='Upload']", "[class*='Drop']",
+      "[class*='attachment']", "[class*='Attachment']", "[class*='file-input']",
+      "[data-drop]", "[droppable]", "[ondrop]"
     ];
-
-    try {
-      for (const attempt of attempts) {
-        await attempt();
-        await sleep(120);
-        if (fileInputHasResume(input)) {
-          return true;
-        }
-      }
-      return fileInputHasResume(input);
-    } finally {
-      restoreInput();
+    for (const sel of uploadSelectors) {
+      const found = shadowPiercingClosest(target, sel);
+      if (found) return found;
     }
+    const label = shadowPiercingClosest(target, "label");
+    if (label) return label;
+    let host = target.parentElement;
+    for (let depth = 0; depth < 6 && host; depth++) {
+      if (!host.parentElement && host.parentNode?.host) host = host.parentNode.host;
+      else host = host.parentElement;
+      if (host && host !== document.body && host !== document.documentElement) return host;
+    }
+    return target;
+  }
+
+  function fileInputClickPoint(input) {
+    const rect = input.getBoundingClientRect();
+    if (rect.width > 0 || rect.height > 0) {
+      return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+    }
+    const zone = findDropZone(input);
+    const zoneRect = zone.getBoundingClientRect();
+    if (zoneRect.width > 0 || zoneRect.height > 0) {
+      return { x: zoneRect.x + zoneRect.width / 2, y: zoneRect.y + zoneRect.height / 2 };
+    }
+    return { x: 0, y: 0 };
+  }
+
+  async function forceAttachResumeToInput(input, file, fieldLabel, uploadMeta) {
+    if (!uploadMeta?.base64) {
+      return {
+        ok: false,
+        error: "missing_file_data",
+        stage: "validate_file",
+        fieldId: input.dataset.jobmateFieldId || "",
+        backendNodeId: null,
+        fileCount: null
+      };
+    }
+
+    input.dataset.jobmateCdpFileTarget = "1";
+    const point = fileInputClickPoint(input);
+    try {
+      const reply = await extensionMessage({
+        type: "JOBMATE_CDP_SET_FILE",
+        fieldId: input.dataset.jobmateFieldId || "",
+        fieldLabel: fieldLabel || nearbyLabel(input),
+        fieldContext: fieldContext(input),
+        clientX: point.x,
+        clientY: point.y,
+        base64: uploadMeta.base64,
+        mimeType: uploadMeta.mimeType || file?.type,
+        filename: uploadMeta.name || file?.name
+      });
+      const ok = Boolean(reply?.ok && fileInputHasResume(input));
+      if (ok) return { ok: true, ...reply };
+      if (reply?.ok) {
+        return { ok: true, ...reply };
+      }
+      return {
+        ok: false,
+        error: reply?.error || "cdp_file_set_failed",
+        stage: reply?.stage || "cdp_file_set",
+        fieldId: reply?.fieldId || input.dataset.jobmateFieldId || "",
+        backendNodeId: reply?.backendNodeId ?? null,
+        fileCount: reply?.fileCount ?? null
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+        stage: "extension_message",
+        fieldId: input.dataset.jobmateFieldId || "",
+        backendNodeId: null,
+        fileCount: null
+      };
+    } finally {
+      delete input.dataset.jobmateCdpFileTarget;
+    }
+  }
+
+  function fileAttachFailureLines(title, input, fieldItem, result) {
+    const label = fieldItem?.field?.label || nearbyLabel(input) || "file input";
+    const context = fieldItem?.field?.context || fieldContext(input) || "";
+    const lines = [
+      title,
+      `Field: ${label}`,
+      context ? `Context: ${context}` : "",
+      `Stage: ${result?.stage || "unknown"}`,
+      `Error: ${result?.error || "unknown"}`,
+      `Field ID: ${result?.fieldId || input.dataset.jobmateFieldId || ""}`,
+      `Backend node ID: ${result?.backendNodeId ?? "not resolved"}`,
+      `File count: ${result?.fileCount ?? input.files?.length ?? "unknown"}`
+    ];
+    return lines.filter(Boolean);
   }
 
   async function verifyRunner(payloadUrl) {
@@ -1198,6 +1860,18 @@
     return new File([bytes], name.endsWith(".pdf") ? name : `${name}.pdf`, { type: mimeType });
   }
 
+  async function fileToUploadMeta(file) {
+    const buffer = await file.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return {
+      base64: btoa(binary),
+      mimeType: file.type,
+      name: file.name
+    };
+  }
+
   function classifyCoverLetterFileFields(fieldItems) {
     const coverLetterFileIds = [];
     for (const item of fieldItems) {
@@ -1224,24 +1898,41 @@
 
   async function attachResumeOnce(fieldItems, payload, resumeFieldIds, coverLetterFieldIds) {
     if (payload._resumeAttachDone) return;
-    if (!resumeFieldIds.length) {
+    if (!payload.resumeUpload?.base64) {
+      const anyFileFields = fieldItems.some((item) => item.field.type === "file");
+      if (anyFileFields) {
+        panel(["JobMate — no CV configured", "CV file fields were found but no resume PDF is uploaded in extension settings. Go to Settings → upload your resume PDF, then restart."]);
+        await sleep(4000);
+      }
+      return;
+    }
+
+    const resume = base64ToFile(payload.resumeUpload);
+    const coverSet = new Set(coverLetterFieldIds || []);
+    let targetInputs = collectResumeInputs(fieldItems, resumeFieldIds).filter((input) => {
+      const item = fieldItems.find((entry) => entry.node === input);
+      return item && !coverSet.has(item.field.fieldId);
+    });
+
+    if (!targetInputs.length) {
+      const fileFields = fieldItems
+        .filter((item) => item.field.type === "file")
+        .map((item) => `${item.field.label || "file input"}${item.field.context ? ` (${item.field.context})` : ""}`)
+        .slice(0, 6);
+      panel(["JobMate — CV field not selected", "Gemini did not identify a CV file field.", ...fileFields]);
+      await sleep(3000);
       payload._resumeAttachDone = true;
       return;
     }
-    if (!payload.resumeUpload?.base64) return;
-    const resume = base64ToFile(payload.resumeUpload);
-    const coverSet = new Set(coverLetterFieldIds || []);
-    const resumeInputs = collectResumeInputs(fieldItems, resumeFieldIds).filter((input) => {
-      const item = fieldItems.find((entry) => entry.node === input);
-      const fieldId = item?.field.fieldId || "";
-      return fieldId && !coverSet.has(fieldId);
-    });
-    for (const input of resumeInputs) {
+
+    for (const input of targetInputs) {
       if (fileInputHasResume(input) || resumeUploadLooksComplete(input, payload)) continue;
-      let ok = await forceAttachResumeToInput(input, resume);
-      if (!ok) {
-        await sleep(400);
-        await forceAttachResumeToInput(input, resume);
+      const fieldItem = fieldItems.find((entry) => entry.node === input);
+      const fieldLabel = fieldItem?.field?.label || nearbyLabel(input);
+      const result = await forceAttachResumeToInput(input, resume, fieldLabel, payload.resumeUpload);
+      if (!result.ok) {
+        panel(fileAttachFailureLines("JobMate — CV attachment failed", input, fieldItem, result));
+        await sleep(3000);
       }
     }
     payload._resumeAttachDone = true;
@@ -1258,24 +1949,32 @@
       if (item.field.type !== "file") continue;
       const fieldId = item.field.fieldId;
       if (!coverSet.has(fieldId) || resumeSet.has(fieldId)) continue;
-      const input = item.node;
-      const transfer = new DataTransfer();
-      transfer.items.add(coverFile);
-      setInputFiles(input, transfer.files);
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-      input.dispatchEvent(new Event("change", { bubbles: true }));
+      const uploadMeta = payload.coverUpload?.base64
+        ? payload.coverUpload
+        : await fileToUploadMeta(coverFile);
+      const result = await forceAttachResumeToInput(item.node, coverFile, item.field.label, uploadMeta);
+      if (!result.ok) {
+        panel(fileAttachFailureLines("JobMate — cover letter attachment failed", item.node, item, result));
+        await sleep(3000);
+      }
     }
   }
 
-  async function fillControl(item, answer, fast) {
+  async function fillControl(item, answer) {
     const node = item.node;
     const type = item.field.type;
-    const tag = node.tagName.toLowerCase();
     if (type === "file") return;
+
+    if (type === "checkbox" && node.tagName !== "INPUT") {
+      if (!isDemographicField(item.field) && fieldLooksEmpty(item)) {
+        await activateChoice(node, true);
+      }
+      return;
+    }
 
     if (type === "checkbox" && !answer && !isDemographicField(item.field)) {
       if (!node.checked) {
-        node.focus();
+        await focusField(node);
         await activateChoice(node, true);
       }
       return;
@@ -1284,7 +1983,7 @@
     if (!answer) return;
 
     if (type === "contenteditable") {
-      node.focus();
+      await focusField(node);
       node.textContent = answer;
       node.dispatchEvent(new Event("input", { bubbles: true }));
       node.dispatchEvent(new Event("change", { bubbles: true }));
@@ -1293,14 +1992,28 @@
 
     if (type === "radio" || type === "checkbox") {
       await choose(node, answer, type === "checkbox");
-    } else if (tag === "select") {
-      fillSelect(node, answer);
-    } else if (fast) {
-      node.focus();
-      setNativeValue(node, answer);
-    } else {
-      await typeText(node, answer);
+      return;
     }
+
+    if (node.tagName === "SELECT" || type === "select") {
+      await fillDropdownField(item, answer);
+      return;
+    }
+
+    if (item.field.needsSuggestionPick || item.field.fieldKind === "suggestion") {
+      await fillSuggestionField(item, answer);
+      return;
+    }
+
+    if (!["INPUT", "TEXTAREA"].includes(node.tagName)) {
+      await focusField(node);
+      node.textContent = answer;
+      node.dispatchEvent(new Event("input", { bubbles: true }));
+      node.dispatchEvent(new Event("change", { bubbles: true }));
+      return;
+    }
+
+    await fillTextField(node, answer);
   }
 
   async function fillApplicationFieldItems(fieldItems, answers, payload) {
@@ -1314,7 +2027,7 @@
       if (isCoverLetterTextField(item) && looksLikeFilename(answer)) {
         answer = payload.coverLetterText || "";
       }
-      await fillControl(item, answer, true);
+      await fillControl(item, answer);
     }
   }
 
@@ -1323,20 +2036,25 @@
       if (item.field.type === "file") continue;
       if (item.field.type === "checkbox") {
         if (isDemographicField(item.field)) continue;
-        if (!item.node.checked) await activateChoice(item.node, true);
+        if (fieldLooksEmpty(item)) {
+          await activateChoice(item.node, true);
+          await sleep(80);
+          if (fieldLooksEmpty(item)) {
+            item.node.focus();
+            item.node.click();
+            nativeSetChecked(item.node, true);
+          }
+        }
         continue;
       }
       if (item.field.type === "radio") {
         const answer = answers.get(item.field.fieldId) || "";
         if (answer) await choose(item.node, answer, false);
-        else if (item.field.required && fieldLooksEmpty(item)) {
-          await activateChoice(item.node, true);
-        }
         continue;
       }
       if (fieldLooksEmpty(item)) {
         const answer = answers.get(item.field.fieldId) || "";
-        if (answer) await fillControl(item, answer, true);
+        if (answer) await fillControl(item, answer);
       }
     }
   }
@@ -1349,12 +2067,12 @@
     const emptyItems = unresolvedFieldItems(fieldItems);
     if (!emptyItems.length) return;
 
-    const requiredEmpty = emptyItems.filter((item) => item.field.required);
-    const retryNote = requiredEmpty.length
-      ? `CRITICAL — ${requiredEmpty.length} REQUIRED FIELD(S) ARE STILL BLANK. This is a 5-alarm failure. You MUST provide a non-empty answer for every single field listed below. For dropdowns and radio groups, pick the best available option from the options list — returning free text or an empty string is absolutely forbidden. Required fields cannot be skipped under any circumstances. Fill location, visa sponsorship, work authorization, source/how-heard, and all dropdown/checkbox fields. Use every available piece of candidate context and the resume PDF. Required empty fields: ${requiredEmpty.map((i) => `"${i.field.label}" (type=${i.field.type}${i.field.options?.length ? `, options: ${i.field.options.slice(0, 6).join(" | ")}` : ""})`).join("; ")}`
-      : "These fields are still empty on the page. You MUST provide a non-empty answer for every field listed. Fill location, visa sponsorship, work authorization, source/how-heard, dropdowns, and checkbox consent fields. Use candidate context and the resume PDF.";
+    const emptyFieldLines = emptyItems
+      .map((i) => `"${i.field.label}" (type=${i.field.type}${i.field.required ? ", required" : ""}${i.field.options?.length ? `, options: ${i.field.options.slice(0, 6).join(" | ")}` : ""})`)
+      .join("; ");
+    const retryNote = `Still empty on page: ${emptyFieldLines}`;
 
-    panel(["JobMate", `Retrying ${emptyItems.length} empty field(s)${requiredEmpty.length ? ` (${requiredEmpty.length} required)` : ""}…`]);
+    panel(["JobMate", `Retrying ${emptyItems.length} empty field(s)…`]);
     const retryPayload = await extensionMessage({
       type: "JOBMATE_FILL_ANSWERS",
       fields: emptyItems.map((item) => item.field),
@@ -1370,10 +2088,174 @@
     const retryAnswers = new Map((retryPayload.answers || []).map((item) => [item.fieldId, item.answer || ""]));
     for (const item of emptyItems) {
       const answer = retryAnswers.get(item.field.fieldId) || "";
-      if (answer) await fillControl(item, answer, true);
+      if (answer) await fillControl(item, answer);
     }
     await checkNonDemographicCheckboxes(fieldItems);
     return retryAnswers;
+  }
+
+  function isNodeWithinContainer(node, container) {
+    let current = node;
+    while (current) {
+      if (current === container) return true;
+      if (current.parentElement) {
+        current = current.parentElement;
+      } else {
+        const root = current.getRootNode();
+        current = root instanceof ShadowRoot ? root.host : null;
+      }
+    }
+    return false;
+  }
+
+  function sectionTitle(container) {
+    const heading = headingInScope(container);
+    if (heading) return heading;
+    return clean(container.textContent || "").slice(0, 100);
+  }
+
+  function buttonActionText(node) {
+    const shadowBtn = node.shadowRoot?.querySelector("button, a, [role='button']");
+    if (shadowBtn) return actionText(shadowBtn) || actionText(node);
+    return actionText(node);
+  }
+
+  function findButtonInContainer(container, wantedText) {
+    const wanted = norm(wantedText);
+    if (!wanted) return null;
+    for (const btn of queryDeep("button, spl-button, oc-button, [role='button']", container)) {
+      const text = norm(buttonActionText(btn));
+      if (!text) continue;
+      if (text === wanted || text.includes(wanted) || wanted.includes(text)) {
+        return btn.shadowRoot?.querySelector("button, a, [role='button']") || btn;
+      }
+    }
+    return null;
+  }
+
+  function findSectionContainer(section) {
+    const target = norm(section.title || "");
+    for (const root of fieldRoots()) {
+      for (const container of queryDeep("section, fieldset, article, form, oc-experience, oc-education", root)) {
+        const title = norm(sectionTitle(container));
+        if (!title) continue;
+        if (title === target || title.includes(target) || target.includes(title)) {
+          return container;
+        }
+      }
+    }
+    return null;
+  }
+
+  function collectRepeatableSectionSnapshots() {
+    const snapshots = [];
+    const seen = new Set();
+    for (const root of fieldRoots()) {
+      for (const container of queryDeep("section, fieldset, article, form, oc-experience, oc-education", root)) {
+        if (seen.has(container)) continue;
+        seen.add(container);
+        const buttons = [];
+        const buttonSeen = new Set();
+        for (const btn of queryDeep("button, spl-button, oc-button, [role='button']", container)) {
+          if (!isActionRendered(btn)) continue;
+          const text = buttonActionText(btn);
+          if (!text || text.length > 40) continue;
+          const key = norm(text);
+          if (buttonSeen.has(key)) continue;
+          buttonSeen.add(key);
+          buttons.push({ text });
+        }
+        if (!buttons.length) continue;
+        const title = sectionTitle(container);
+        snapshots.push({
+          sectionId: `sec_${snapshots.length}`,
+          title,
+          bodyText: clean(container.textContent || "").slice(0, 500),
+          buttons
+        });
+      }
+    }
+    return snapshots;
+  }
+
+  function subformFieldItems(container) {
+    return controls().filter((item) => isNodeWithinContainer(item.node, container));
+  }
+
+  async function fillRepeatableRecordSections(pageLanguage) {
+    const snapshots = collectRepeatableSectionSnapshots();
+    if (!snapshots.length) return;
+
+    const detect = await extensionMessage({
+      type: "JOBMATE_DETECT_REPEATABLE_SECTIONS",
+      sections: snapshots,
+      pageLanguage
+    }).catch(() => null);
+    if (!detect?.ok || !detect.sections?.length) return;
+
+    const extract = await extensionMessage({
+      type: "JOBMATE_EXTRACT_RECORDS",
+      pageLanguage
+    }).catch(() => null);
+    if (!extract?.ok) return;
+
+    const recordsByType = {
+      experience: Array.isArray(extract.experience) ? extract.experience : [],
+      education: Array.isArray(extract.education) ? extract.education : []
+    };
+
+    for (const section of detect.sections) {
+      if (section.recordType === "other") continue;
+      const entries = recordsByType[section.recordType];
+      if (!entries?.length) continue;
+
+      const snapshot = snapshots.find((item) => item.sectionId === section.sectionId);
+      const container = findSectionContainer(snapshot ? { ...section, title: snapshot.title } : section);
+      if (!container) continue;
+
+      for (const record of entries) {
+        const addBtn = findButtonInContainer(container, section.addButtonText);
+        if (!addBtn) continue;
+        await aggressiveClick(addBtn);
+        await sleep(700);
+
+        const subFields = subformFieldItems(container).filter((item) => item.field.type !== "file");
+        if (!subFields.length) continue;
+
+        const actionButtons = [];
+        const actionSeen = new Set();
+        for (const btn of queryDeep("button, spl-button, oc-button, [role='button']", container)) {
+          const text = buttonActionText(btn);
+          const key = norm(text);
+          if (!text || actionSeen.has(key)) continue;
+          actionSeen.add(key);
+          actionButtons.push(text);
+        }
+
+        const mapResult = await extensionMessage({
+          type: "JOBMATE_MAP_RECORD_FIELDS",
+          recordType: section.recordType,
+          record,
+          fields: subFields.map((item) => item.field),
+          actionButtons,
+          pageLanguage
+        }).catch(() => null);
+        if (!mapResult?.ok) continue;
+
+        const recordAnswers = new Map((mapResult.answers || []).map((item) => [item.fieldId, item.answer || ""]));
+        for (const item of subFields) {
+          const answer = recordAnswers.get(item.field.fieldId) || "";
+          await fillControl(item, answer);
+        }
+        await sleep(250);
+
+        const saveBtn = findButtonInContainer(container, mapResult.saveButtonText);
+        if (saveBtn) {
+          await aggressiveClick(saveBtn);
+          await sleep(900);
+        }
+      }
+    }
   }
 
   async function fillApplicationForm(payload) {
@@ -1414,6 +2296,22 @@
     await attachResumeOnce(fieldItems, payload, resumeFieldIds, coverLetterFileIds);
     await fillApplicationFieldItems(fieldItems, answers, payload);
     await ensureRequiredChoicesFilled(fieldItems, answers);
+    await fillRepeatableRecordSections(detectPageLanguage());
+
+    const emptyRequired = fieldItems.filter(
+      (item) => item.field.type !== "file" && item.field.required && fieldLooksEmpty(item)
+    );
+    if (emptyRequired.length) {
+      const refusal = await extensionMessage({
+        type: "JOBMATE_EXPLAIN_REFUSAL",
+        fields: emptyRequired.map((item) => item.field),
+        answers: emptyRequired.map((item) => ({ fieldId: item.field.fieldId, answer: answers.get(item.field.fieldId) || "" }))
+      }).catch(() => null);
+      if (refusal?.ok && refusal.lines?.length) {
+        panel(["JobMate — Gemini left required fields blank", ...refusal.lines.slice(0, 8)]);
+        await sleep(3000);
+      }
+    }
 
     const needsCoverLetterReview =
       coverLetterFileIds.length > 0 || hasCoverLetterTextField(fieldItems);
@@ -1433,7 +2331,7 @@
         if (payload.coverLetterText) {
           for (const item of fieldItems) {
             if (isCoverLetterTextField(item)) {
-              await fillControl(item, payload.coverLetterText, true);
+              await fillControl(item, payload.coverLetterText);
             }
           }
         } else {
@@ -1452,32 +2350,20 @@
 
   async function fillAuthForm(payload, fieldItems, elements) {
     const password = await getSitePassword();
-    const { first, last } = splitFullName(payload.candidateFullName);
-    const email = payload.candidateEmail.trim();
-    const fullName = payload.candidateFullName.trim() || `${first} ${last}`.trim();
+    const answersPayload = await extensionMessage({
+      type: "JOBMATE_FILL_ANSWERS",
+      fields: fieldItems.map((item) => item.field),
+      pageLanguage: detectPageLanguage()
+    });
+    if (!answersPayload?.ok) {
+      throw new Error(answersPayload?.error || "Could not generate auth form answers.");
+    }
+    const answers = new Map((answersPayload.answers || []).map((item) => [item.fieldId, item.answer || ""]));
 
     for (const item of fieldItems) {
-      const type = item.field.type;
-      const label = norm(item.field.label);
-
-      if (type === "email" || label.includes("email")) {
-        await fillControl(item, email, true);
-      } else if (type === "password" || label.includes("password")) {
-        await fillControl(item, password, true);
-      } else if (label.includes("first") && label.includes("name")) {
-        await fillControl(item, first, true);
-      } else if (label.includes("last") && label.includes("name")) {
-        await fillControl(item, last, true);
-      } else if (label.includes("name") && !label.includes("user")) {
-        await fillControl(item, fullName, true);
-      } else if (type === "checkbox") {
-        if (item.node.required || label.includes("agree") || label.includes("terms") || label.includes("consent")) {
-          if (!item.node.checked) {
-            item.node.click();
-            item.node.dispatchEvent(new Event("change", { bubbles: true }));
-          }
-        }
-      }
+      let answer = answers.get(item.field.fieldId) || "";
+      if (item.field.type === "password") answer = password;
+      if (answer) await fillControl(item, answer);
     }
 
     const passwordField = fieldItems.find((item) => item.field.type === "password");
@@ -1643,7 +2529,7 @@
         if (data?.ok) {
           const answer = (data.answers || []).find((a) => a.fieldId === selectedItem.field.fieldId)?.answer || "";
           if (answer) {
-            await fillControl(selectedItem, answer, true);
+            await fillControl(selectedItem, answer);
           }
         }
 
@@ -1665,14 +2551,17 @@
   }
 
   async function rememberPlaybookStep(pageUrl, fieldCount, action, elements) {
+    const pageText = clean(document.body?.textContent || "").slice(0, 800);
     if (action.tool === "navigate" && action.url) {
-      await recordPlaybookStep(pageUrl, fieldCount, "navigate", null, action.url);
+      await recordPlaybookStep(pageUrl, fieldCount, "navigate", null, action.url, pageText);
       return;
     }
     if (action.tool !== "click" && action.tool !== "submit") return;
-    const elemEntry = elements.find((e) => e.elementId === action.elementId);
+    const elemEntry =
+      elements.find((e) => e.elementId === action.elementId) ||
+      cachedInteractiveActions.find((e) => e.elementId === action.elementId);
     if (!elemEntry) return;
-    await recordPlaybookStep(pageUrl, fieldCount, action.tool, elemEntry);
+    await recordPlaybookStep(pageUrl, fieldCount, action.tool, elemEntry, null, pageText);
   }
 
   async function rememberPlaybookIfAdvanced(stateBefore, pageUrl, fieldCount, action, elements) {
@@ -1787,20 +2676,30 @@
     return fetch(url, init);
   }
 
+  function isRegistrationGatePage(elements) {
+    const fields = elements.filter((e) => e.type === "field");
+    if (fields.some((f) => f.fieldType === "file" || f.fieldType === "textarea" || f.fieldType === "contenteditable")) {
+      return false;
+    }
+    if (fields.length >= 8) return false;
+    return fields.some((f) => f.fieldType === "password");
+  }
+
+  function authGateReadyToFill(fieldItems) {
+    return fieldItems.some((item) => item.field.type === "password");
+  }
+
   function isApplicationFormPage(elements) {
     const fields = elements.filter((e) => e.type === "field");
     if (!fields.length) return false;
+    if (isRegistrationGatePage(elements)) return false;
     const hasPassword = fields.some((f) => f.fieldType === "password");
     if (hasPassword) return false;
     return true;
   }
 
   function isAuthFormPage(elements) {
-    const fields = elements.filter((e) => e.type === "field");
-    if (!fields.length) return false;
-    const hasPassword = fields.some((f) => f.fieldType === "password");
-    if (!hasPassword) return false;
-    return !isApplicationFormPage(elements);
+    return isRegistrationGatePage(elements);
   }
 
   function statusPanel(step, maxSteps, action, extra) {
@@ -1824,7 +2723,7 @@
   function recordUrlPingPong(href) {
     const u = normalizeHref(href);
     if (!u) return false;
-    if (u === urlPingPongTrack.last) return urlPingPongTrack.switches >= 2;
+    if (u === urlPingPongTrack.last) return urlPingPongTrack.switches >= 6;
     if (!urlPingPongTrack.a) {
       urlPingPongTrack.a = u;
       urlPingPongTrack.last = u;
@@ -1839,23 +2738,59 @@
     if (u === urlPingPongTrack.a || u === urlPingPongTrack.b) {
       urlPingPongTrack.switches += 1;
       urlPingPongTrack.last = u;
-      return urlPingPongTrack.switches >= 2;
+      return urlPingPongTrack.switches >= 6;
     }
     return false;
   }
 
-  async function stopUrlPingPong() {
-    await requestHumanHelp(
-      "Stopped: the page kept switching between the same two URLs.",
-      "Open the job application page directly, then click Continue."
-    );
+  async function recoverFromUrlPingPong(step, history, hiddenApplyUrl, blockedElementIds, payloadUrl) {
+    panel(["JobMate", "Finding apply button…", "Clicking through to the application form."]);
+    resetUrlPingPongTrack();
+    await extensionMessage({ type: "JOBMATE_RESET_URL_OSCILLATION" }).catch(() => { });
+
+    const rescan = await forcePageRescan(hiddenApplyUrl);
+    const action = await callStep(step, history, hiddenApplyUrl, rescan.elements, blockedElementIds);
+
+    if (action.tool === "click" && action.elementId) {
+      const ok = await activateElement(payloadUrl, action.elementId, rescan.elements, {
+        step,
+        maxSteps: MAX_STEPS,
+        action
+      });
+      if (ok) {
+        history.push({
+          step,
+          tool: "click",
+          reasoning: action.reasoning || "apply navigation after url oscillation",
+          elementId: action.elementId
+        });
+        await sleep(600);
+        return true;
+      }
+    }
+
+    if (action.tool === "navigate" && action.url && navigateNow(action.url, hiddenApplyUrl)) {
+      history.push({
+        step,
+        tool: "navigate",
+        reasoning: action.reasoning || "apply navigation after url oscillation",
+        url: action.url
+      });
+      return true;
+    }
+
+    return false;
   }
 
-  function isSubmitLike(node, action) {
-    const t = (node.getAttribute("type") || node.type || "").toLowerCase();
-    const text = clean(node.textContent || node.value || "").toLowerCase();
-    const autoId = (node.getAttribute("data-automation-id") || "").toLowerCase();
-    return t === "submit" || autoId.includes("submit") || /^(sign in|log in|login|register|create account|submit|continue|next|send)$/i.test(text);
+  async function stopUrlPingPong(step, history, hiddenApplyUrl, blockedElementIds, payloadUrl) {
+    const recovered = await recoverFromUrlPingPong(step, history, hiddenApplyUrl, blockedElementIds, payloadUrl);
+    if (recovered) {
+      return;
+    }
+    await requestHumanHelp(
+      "Stopped: the browser kept switching between the same two URLs.",
+      "Complete what's needed on this page, then click Continue."
+    );
   }
 
   async function run() {
@@ -1873,6 +2808,7 @@
     const payloadResp = await extensionMessage({ type: "JOBMATE_GET_PAYLOAD" });
     if (!payloadResp?.ok) throw new Error(payloadResp?.error || "Could not load payload.");
     const payload = payloadResp.payload;
+    applySessionTargetUrl = payload.applyUrl || location.href;
 
     panel("JobMate: waiting for page to load…");
     await waitForPageLoad();
@@ -1887,7 +2823,7 @@
     let lastReason = "";
     let lastFormFill = null;
 
-    async function checkStuck(stateBefore, instruction, taskKey) {
+    async function checkStuck(step, stateBefore, instruction, taskKey, hiddenApplyUrl) {
       await sleep(400);
       const { fieldItems: fieldsAfter } = collectPageElements(null);
       const stateAfter = pageStateKey(fieldsAfter.length);
@@ -1901,11 +2837,23 @@
       const totalFailures = (failedTaskAttempts.get(stuckTaskKey) || 0) + 1;
       failedTaskAttempts.set(stuckTaskKey, totalFailures);
       if (totalFailures >= STUCK_THRESHOLD || attempts >= STUCK_THRESHOLD) {
+        const rescan = await forcePageRescan(hiddenApplyUrl);
+        if (rescan.fieldItems.length > 0) {
+          failuresByState.set(stateBefore, 0);
+          failedTaskAttempts.set(stuckTaskKey, 0);
+          return;
+        }
+        const probe = await callStep(step, history, hiddenApplyUrl, rescan.elements, blockedElementIds);
+        if (probe.tool !== "wait" && probe.tool !== "blocked") {
+          failuresByState.set(stateBefore, 0);
+          failedTaskAttempts.set(stuckTaskKey, 0);
+          return;
+        }
         failuresByState.set(stateBefore, 0);
         failedTaskAttempts.set(stuckTaskKey, 0);
         const userInstruction = await requestHumanHelp(
           lastReason || "The agent is stuck on this step.",
-          instruction || "Please complete this step manually, then click Continue."
+          instruction || "Complete what's needed on this page, then click Continue."
         );
         history.push({ step: history.length, tool: "human_unblocked", reasoning: "user resolved stuck state" });
         if (userInstruction) {
@@ -1924,7 +2872,7 @@
         forcedInterrupt = null;
         const userInstruction = await requestHumanHelp(
           pending.reason || "Interrupted by user.",
-          pending.instruction || "Complete what is needed to unblock, then click Continue."
+          pending.instruction || "Complete what's needed on this page, then click Continue."
         );
         history.push({ step: history.length, tool: "human_interrupt", reasoning: pending.reason || "Interrupted by user." });
         if (userInstruction) {
@@ -1935,24 +2883,15 @@
 
       await waitForPageLoad();
 
-      if (recordUrlPingPong(location.href)) {
-        await stopUrlPingPong();
-        continue;
-      }
-
-      if (pageHostName() === "workatastartup.com") {
-        try {
-          if (isWorkAtAStartupApplicantPortalPath(new URL(location.href).pathname)) {
-            await requestHumanHelp(
-              "Blocked: landed on Work at a Startup account/profile page.",
-              "Use the browser back button to return to the job listing (/jobs/…), then click Continue."
-            );
-            continue;
-          }
-        } catch { }
-      }
-
       let hiddenApplyUrl = extractHiddenApplyUrl();
+
+      if (
+        applySessionTargetUrl &&
+        normalizeHref(location.href) !== normalizeHref(applySessionTargetUrl)
+      ) {
+        hasLeftTargetListing = true;
+      }
+
       let { elements, fieldItems } = collectPageElements(hiddenApplyUrl);
       if (!fieldItems.length) {
         const dialogSelector = '[role="dialog"], [role="alertdialog"], dialog, .modal, [class*="modal"], [class*="dialog"], [aria-modal="true"]';
@@ -1975,6 +2914,12 @@
         elements = rescanned.elements;
         fieldItems = rescanned.fieldItems;
       }
+
+      if (recordUrlPingPong(location.href)) {
+        await stopUrlPingPong(step, history, hiddenApplyUrl, blockedElementIds, payloadUrl);
+        continue;
+      }
+
       const stateBefore = pageStateKey(fieldItems.length);
       const formKey = stateBefore;
 
@@ -1985,38 +2930,59 @@
           }
           handledForms.add(formKey);
           failuresByState.delete(stateBefore);
+          resetUrlPingPongTrack();
+          await extensionMessage({ type: "JOBMATE_RESET_URL_OSCILLATION" }).catch(() => { });
           await fillApplicationForm(payload);
           history.push({ step, tool: "form_fill", reasoning: `filled ${fieldItems.length} fields` });
           continue;
         }
 
         if (isAuthFormPage(elements)) {
-          panel(["JobMate", "Login/register form", "Filling and submitting…"]);
-          await fillAuthForm(payload, fieldItems, elements);
-          history.push({ step, tool: "auth_fill", reasoning: "filled and submitted auth form" });
-          const { fieldItems: fieldsAfter } = collectPageElements(null);
-          const stateAfter = pageStateKey(fieldsAfter.length);
-          if (stateAfter !== stateBefore) {
-            handledForms.add(formKey);
-            failuresByState.delete(stateBefore);
-          } else {
-            await checkStuck(
-              stateBefore,
-              "Please submit the login/registration form manually, then click Continue.",
-              `auth_submit|${stateBefore}`
-            );
+          if (authGateReadyToFill(fieldItems) && !handledForms.has(formKey)) {
+            panel(["JobMate", "Login/register form", "Filling and submitting…"]);
+            await fillAuthForm(payload, fieldItems, elements);
+            history.push({ step, tool: "auth_fill", reasoning: "filled and submitted auth form" });
+            const { fieldItems: fieldsAfter } = collectPageElements(null);
+            const stateAfter = pageStateKey(fieldsAfter.length);
+            if (stateAfter !== stateBefore) {
+              handledForms.add(formKey);
+              failuresByState.delete(stateBefore);
+            } else {
+              await checkStuck(
+                step,
+                stateBefore,
+                "Please submit the login/registration form manually, then click Continue.",
+                `auth_submit|${stateBefore}`,
+                hiddenApplyUrl
+              );
+            }
+            continue;
           }
-          continue;
         }
       }
 
       const pageUrlBefore = location.href;
       const fieldCountBefore = fieldItems.length;
-      panel([`JobMate · step ${step + 1}/${MAX_STEPS}`, "Navigating…"]);
-      const action = await callStep(step, history, hiddenApplyUrl, elements, blockedElementIds);
-      if (action.fromPlaybook) {
+      panel([`JobMate · step ${step + 1}/${MAX_STEPS}`, "Analyzing page…"]);
+      let action = await callStep(step, history, hiddenApplyUrl, elements, blockedElementIds);
+      if (action.fromSemanticMemory || action.fromPlaybook) {
         panel([`JobMate · step ${step + 1}/${MAX_STEPS}`, "Known path…"]);
+      } else if (action.tool !== "wait") {
+        statusPanel(step, MAX_STEPS, action);
       }
+
+      if (action.tool === "wait") {
+        const upgraded = await tryUpgradeWaitAction(step, history, hiddenApplyUrl, blockedElementIds);
+        if (upgraded.rescanFields) {
+          failuresByState.delete(stateBefore);
+          failedTaskAttempts.delete(`wait|${stateBefore}`);
+          continue;
+        }
+        if (upgraded.action) {
+          action = upgraded.action;
+        }
+      }
+
       const histEntry = {
         step,
         tool: action.tool,
@@ -2029,7 +2995,7 @@
       if (action.tool === "blocked") {
         const userInstruction = await requestHumanHelp(
           action.reasoning || "The agent is blocked.",
-          "Please complete this step manually, then click Continue."
+          "Complete what's needed on this page, then click Continue."
         );
         history.push({ ...histEntry, tool: "human_unblocked" });
         if (userInstruction) {
@@ -2042,16 +3008,19 @@
       if (action.tool === "wait") {
         statusPanel(step, MAX_STEPS, action, "Waiting for page…");
         history.push(histEntry);
-        await checkStuck(stateBefore, "Please complete this step manually, then click Continue.", `wait|${stateBefore}`);
+        await checkStuck(step, stateBefore, "Complete what's needed on this page, then click Continue.", `wait|${stateBefore}`, hiddenApplyUrl);
         continue;
       }
 
       if (action.tool === "navigate" && action.url) {
-        if (isForbiddenNavigationUrl(action.url, location.href)) {
+        if (
+          (applySessionTargetUrl && isOffTargetJobUrl(action.url, getApplyAnchors(hiddenApplyUrl), location.href)) ||
+          (hasLeftTargetListing && applySessionTargetUrl && isReturnToListingUrl(action.url, applySessionTargetUrl, location.href))
+        ) {
           blockedElementIds.add(action.elementId || `nav:${action.url}`);
           const userInstruction = await requestHumanHelp(
             "Blocked forbidden navigation.",
-            "Return to the job listing and click Apply there, then click Continue."
+            "Complete what's needed on this page, then click Continue."
           );
           if (userInstruction) {
             history.push({ step: history.length, tool: "human_instruction", reasoning: userInstruction });
@@ -2059,15 +3028,44 @@
           continue;
         }
         statusPanel(step, MAX_STEPS, action);
-        await rememberPlaybookStep(pageUrlBefore, fieldCountBefore, action, elements).catch(() => { });
-        if (navigateNow(action.url)) return;
-        history.push({ ...histEntry, reasoning: "already on target page" });
+        if (navigateNow(action.url, hiddenApplyUrl)) {
+          await rememberPlaybookStep(pageUrlBefore, fieldCountBefore, action, elements).catch(() => { });
+          return;
+        }
+        blockedElementIds.add(`nav:${action.url}`);
+        history.push({ ...histEntry, reasoning: "navigation did not change page" });
         await checkStuck(
+          step,
           stateBefore,
-          "Please navigate or complete this step manually, then click Continue.",
-          `navigate|${action.url || stateBefore}`
+          "Complete what's needed on this page, then click Continue.",
+          `navigate|${action.url || stateBefore}`,
+          hiddenApplyUrl
         );
         continue;
+      }
+
+      if (action.tool === "select" && action.elementId && action.value) {
+        const node = nodeByElementId(action.elementId);
+        const fieldItem = fieldItems.find((item) => item.node === node) || {
+          node,
+          field: { type: "select", label: node ? nearbyLabel(node) : "" }
+        };
+        if (node) {
+          statusPanel(step, MAX_STEPS, action);
+          await fillDropdownField(fieldItem, action.value);
+          history.push(histEntry);
+          continue;
+        }
+      }
+
+      if (action.tool === "type" && action.elementId && action.value) {
+        const node = nodeByElementId(action.elementId);
+        if (node) {
+          statusPanel(step, MAX_STEPS, action);
+          await fillTextField(node, action.value);
+          history.push(histEntry);
+          continue;
+        }
       }
 
       if (action.tool === "submit" && action.elementId) {
@@ -2079,7 +3077,7 @@
         return;
       }
 
-      if (action.tool === "click" && action.elementId) {
+      if (action.tool === "click" && (action.elementId || action.coords)) {
         const ok = await activateElement(payloadUrl, action.elementId, elements, { step, maxSteps: MAX_STEPS, action });
         if (ok === "navigated") {
           await rememberPlaybookStep(pageUrlBefore, fieldCountBefore, action, elements).catch(() => { });
@@ -2087,17 +3085,31 @@
           return;
         }
         history.push(histEntry);
-        if (ok) {
+
+        await sleep(600);
+        const { fieldItems: fieldsAfterClick, elements: elementsAfterClick } = collectPageElements(null);
+        const stateAfterClick = pageStateKey(fieldsAfterClick.length);
+        const pageStuck = stateAfterClick === stateBefore;
+        const urlChanged = normalizeHref(location.href) !== normalizeHref(pageUrlBefore);
+        const advanced = !pageStuck || urlChanged || isApplicationFormPage(elementsAfterClick);
+
+        if (ok && advanced) {
           failuresByState.delete(stateBefore);
+          resetUrlPingPongTrack();
+          await extensionMessage({ type: "JOBMATE_RESET_URL_OSCILLATION" }).catch(() => { });
           await rememberPlaybookIfAdvanced(stateBefore, pageUrlBefore, fieldCountBefore, action, elements).catch(() => { });
-        } else {
+        } else if (action.coords) {
+          blockedElementIds.add(`coord:${action.coords.x},${action.coords.y}`);
+        } else if (action.elementId) {
           blockedElementIds.add(action.elementId);
         }
 
-        await sleep(600);
-        const { fieldItems: fieldsAfterClick } = collectPageElements(null);
-        const stateAfterClick = pageStateKey(fieldsAfterClick.length);
-        const pageStuck = stateAfterClick === stateBefore;
+        if (ok && action.value) {
+          await sleep(300);
+          if (!(await findAndClickOption(action.value))) {
+            await clickDropdownOptionViaOcr(action.value, action.reasoning || "");
+          }
+        }
 
         if (pageStuck && lastFormFill && lastFormFill.url === pageUrlBefore) {
           const fill = lastFormFill;
@@ -2130,22 +3142,6 @@
             continue;
           }
 
-          if (validateResult?.ok && validateResult.corrections?.length) {
-            for (const item of fill.fieldItems) {
-              const corr = validateResult.corrections.find((entry) => entry.fieldId === item.field.fieldId);
-              if (corr?.answer) {
-                await fillControl(item, corr.answer, true);
-                fill.answers.set(item.field.fieldId, corr.answer);
-              }
-            }
-            lastFormFill = fill;
-            if (action.elementId) {
-              const retryOk = await activateElement(payloadUrl, action.elementId, elements, { step, maxSteps: MAX_STEPS, action });
-              if (retryOk === "navigated") return;
-            }
-            continue;
-          }
-
           const placementReport = fill.fieldItems
             .filter((item) => item.field.type !== "file")
             .map((item) => ({
@@ -2157,8 +3153,6 @@
               answer: fill.answers.get(item.field.fieldId) || ""
             }));
 
-          panel(["JobMate", "Form failed — retrieving from AI…"]);
-
           const explainResult = await extensionMessage({
             type: "JOBMATE_EXPLAIN_PLACEMENTS",
             placements: placementReport,
@@ -2167,31 +3161,25 @@
 
           if (explainResult?.ok && Array.isArray(explainResult.explanations)) {
             const lines = explainResult.explanations.map((e) =>
-              `Field: "${e.label}" (${e.type})\nPlaced: ${JSON.stringify(e.answer)}\nReason: ${e.reasoning}\nCorrection: ${JSON.stringify(e.correctedAnswer)}`
+              `Field: "${e.label}" (${e.type})\nPlaced: ${JSON.stringify(e.answer)}\nReason: ${e.reasoning}`
             );
-            panel(["JobMate — AI Placement Audit", ...lines.slice(0, 6)]);
+            panel(["JobMate — form audit", ...lines.slice(0, 6)]);
             await sleep(1200);
-
-            for (const item of fill.fieldItems) {
-              const exp = explainResult.explanations.find((e) => e.fieldId === item.field.fieldId);
-              if (exp?.correctedAnswer && exp.correctedAnswer !== exp.answer) {
-                await fillControl(item, exp.correctedAnswer, true);
-                fill.answers.set(item.field.fieldId, exp.correctedAnswer);
-              }
-            }
           }
         }
 
         await checkStuck(
+          step,
           stateBefore,
-          "Please click the required button manually, then click Continue.",
-          `click|${action.elementId || stateBefore}`
+          "Complete what's needed on this page, then click Continue.",
+          `click|${action.elementId || stateBefore}`,
+          hiddenApplyUrl
         );
         continue;
       }
 
       history.push(histEntry);
-      await checkStuck(stateBefore, "Please complete this step manually, then click Continue.", `${action.tool}|${stateBefore}`);
+      await checkStuck(step, stateBefore, "Complete what's needed on this page, then click Continue.", `${action.tool}|${stateBefore}`, hiddenApplyUrl);
     }
 
     panel(["JobMate: step limit reached", "Could not reach application form."]);
@@ -2204,7 +3192,7 @@
         instruction:
           typeof msg.instruction === "string"
             ? msg.instruction
-            : "Complete what is needed to unblock, then click Continue."
+            : "Complete what's needed on this page, then click Continue."
       };
       sendResponse({ ok: true });
       return true;

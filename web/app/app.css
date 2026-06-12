@@ -396,6 +396,20 @@ html[data-theme="light"] .jm-targets-chevron {
   padding: 0.75rem;
 }
 
+.jm-target-add-card {
+  min-height: 10rem;
+  border: 2px dashed var(--color-border);
+  border-radius: 8px;
+  background-color: transparent;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.jm-target-add-card:hover {
+  background-color: var(--color-bg-side);
+  border-color: var(--color-text-primary);
+}
+
 html[data-theme="light"] .bg-white {
   color: #1a1a1a;
 }
